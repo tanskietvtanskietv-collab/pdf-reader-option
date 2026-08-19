@@ -1,0 +1,6 @@
+node_modules/
+dist/
+client/public/pdfjs/
+server/test/fixtures/
+*.log
+.DS_Store

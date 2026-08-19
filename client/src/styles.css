@@ -1,0 +1,120 @@
+:root {
+  --surface-0: #0d1015;
+  --surface-1: #161b22;
+  --surface-2: #1d232c;
+  --surface-3: #29313c;
+  --border: #2c333d;
+  --text: #e6eaf0;
+  --text-muted: #9aa4b2;
+  --text-faint: #6b7683;
+  --accent: #4c8dff;
+  --accent-soft: #1e2f4d;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  /* The window itself never scrolls — each panel owns its own scroll area. */
+  overflow: hidden;
+}
+
+body {
+  margin: 0;
+  background: var(--surface-0);
+  color: var(--text);
+  font-family: 'Noto Sans JP', 'Meiryo', 'Hiragino Kaku Gothic ProN', system-ui, -apple-system,
+    'Segoe UI', sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 11px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+button:hover:not(:disabled) {
+  background: #333c49;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+button.primary:hover:not(:disabled) {
+  background: #3f7ce8;
+}
+
+button.ghost {
+  background: transparent;
+}
+
+button.ghost.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+input[type='text'],
+input[type='search'] {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  min-width: 0;
+}
+
+input[type='text']:focus,
+input[type='search']:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  border-color: var(--accent);
+}
+
+input:disabled {
+  opacity: 0.5;
+}
+
+fieldset {
+  margin: 0;
+  min-width: 0;
+}
+
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #39424e;
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #4a5462;
+  background-clip: content-box;
+}
