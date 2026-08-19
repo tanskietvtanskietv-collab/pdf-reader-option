@@ -17,5 +17,5 @@ services:
     buildCommand: npm install && npm run build
     staticPublishPath: dist
     envVars:
-      - key: VITE_API_URL
+      - key: VITE_API_TARGET
         value: https://myapp-backend.onrender.com
