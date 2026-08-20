@@ -26,4 +26,4 @@ services:
       # is baked into the bundle so the browser calls the backend origin
       # directly. The backend already sends cors() headers for that.
       - key: VITE_API_BASE
-        value: https://myapp-backend.onrender.com
+        value: https://myapp-backend-xbmo.onrender.com
