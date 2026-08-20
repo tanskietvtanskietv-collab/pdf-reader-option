@@ -1,6 +1,16 @@
 /** Thin wrapper around the Node backend. All coordinates come from the server. */
 
-const BASE = '/api';
+/**
+ * Relative by default, on purpose: in dev the page is served by Vite, so the
+ * browser requests `/api/...` from the Vite origin and Vite proxies it to the
+ * API — same origin, no CORS preflight. In production `npm start` serves the API
+ * and client/dist from one origin, so the identical paths keep working.
+ *
+ * Set `VITE_API_BASE=http://localhost:3000` in `client/.env` to bypass the proxy
+ * and call the API origin directly instead (the server already sends CORS
+ * headers). Leave it unset unless you actually need cross-origin calls.
+ */
+const BASE = `${import.meta.env.VITE_API_BASE ?? ''}/api`;
 
 async function asJson(response) {
   const payload = await response.json().catch(() => ({}));

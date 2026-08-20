@@ -2,5 +2,8 @@ node_modules/
 dist/
 client/public/pdfjs/
 server/test/fixtures/
+.env
+.env.local
+!.env.example
 *.log
 .DS_Store

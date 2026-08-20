@@ -20,7 +20,13 @@ npm run install:all     # root + server + client dependencies
 npm run dev             # API on :3000, Vite dev server on :5173
 ```
 
-Open http://localhost:5173. For a single-process deployment:
+Open http://localhost:5173. The client requests **relative** `/api/...` paths, so
+in dev the browser shows `localhost:5173/api/...` and the Vite proxy forwards it to
+the API on :3000 — same origin, no CORS preflight. That is expected. See
+[client/.env.example](client/.env.example) to change the proxy target, expose the
+dev server on the LAN, or bypass the proxy with an absolute API origin.
+
+For a single-process deployment:
 
 ```bash
 npm run build           # builds client/dist
@@ -106,15 +112,27 @@ replacing `server/src/services/documentStore.js` — nothing else touches it.
 
 ## Environment variables
 
+Server values live in `server/.env` (loaded by `--env-file-if-exists` in the npm
+scripts, so `npm start`/`npm run dev` pick them up but a bare `node src/index.js`
+does not); client values in `client/.env`. Both mirror a checked-in `.env.example`.
+A real environment variable always wins over the file, which is how Render's
+injected `PORT` works.
+
+Deploying the client **statically** (as [render.yaml](render.yaml) does) needs
+`VITE_API_BASE` — `VITE_API_TARGET` only configures the dev proxy and has no
+effect on a production build.
+
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `PORT` / `HOST` | `3000` / `127.0.0.1` | API listener |
+| `PORT` / `HOST` | `3000` / `0.0.0.0` | API listener |
 | `MAX_UPLOAD_BYTES` | `104857600` | Upload size limit (100 MB) |
 | `DOC_TTL_MS` | `3600000` | Idle lifetime of a cached document |
 | `DOC_SWEEP_MS` | `300000` | Expiry sweep interval |
 | `DOC_MAX` | `12` | Max cached documents |
 | `SEARCH_MAX_RESULTS` | `5000` | Coordinate cap per search (counts stay exact) |
-| `API_TARGET` | `http://127.0.0.1:3000` | Backend the Vite dev proxy points at |
+| `VITE_API_TARGET` | `http://127.0.0.1:3000` | **Dev only.** Backend the Vite dev proxy forwards to (keep it on loopback) |
+| `VITE_DEV_HOST` | unset | Set to `0.0.0.0` to expose the dev client on the LAN |
+| `VITE_API_BASE` | unset | **Build time.** Absolute API origin baked into the bundle; required when the client is hosted statically, apart from the backend |
 
 ## Layout
 

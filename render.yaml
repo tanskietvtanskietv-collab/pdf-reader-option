@@ -9,6 +9,10 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      # Render injects PORT itself. HOST must be 0.0.0.0 or the container is
+      # unreachable — real environment variables win over server/.env.
+      - key: HOST
+        value: 0.0.0.0
 
   - type: web
     name: myapp-frontend
@@ -17,5 +21,9 @@ services:
     buildCommand: npm install && npm run build
     staticPublishPath: dist
     envVars:
-      - key: VITE_API_TARGET
+      # A static site has no dev server, so VITE_API_TARGET (the Vite dev proxy
+      # target) does nothing here. VITE_API_BASE is the build-time variable: it
+      # is baked into the bundle so the browser calls the backend origin
+      # directly. The backend already sends cors() headers for that.
+      - key: VITE_API_BASE
         value: https://myapp-backend.onrender.com

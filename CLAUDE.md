@@ -33,7 +33,52 @@ npm --prefix server run fixture   # regenerate server/test/fixtures/sample.pdf
 
 `npm run dev` uses [scripts/dev.mjs](scripts/dev.mjs), a dependency-free
 replacement for `concurrently` — the root package.json intentionally has **no**
-dependencies. Vite proxies `/api` to `API_TARGET` (default `http://127.0.0.1:3000`).
+dependencies.
+
+## How the client reaches the API
+
+[client/src/api.js](client/src/api.js) calls **relative** `/api/...` paths. In dev
+the page comes from Vite, so the browser requests `localhost:5173/api/...` and the
+Vite proxy forwards to the API — same origin, no CORS preflight. In production
+`npm start` serves the API and `client/dist` from one origin, so the same
+relative paths keep working. Seeing `:5173/api/...` in devtools is correct; that
+request is answered by Express.
+
+Three knobs, all read through `loadEnv` in [client/vite.config.js](client/vite.config.js)
+so `client/.env` works (a bare `process.env.VITE_*` in a Vite config only sees
+shell variables, never `.env` files — that trips people up):
+
+| Variable | Effect |
+| --- | --- |
+| `VITE_API_TARGET` | Proxy destination, default `http://127.0.0.1:3000`. **Keep this on loopback** — the proxy runs inside the dev server, so a hardcoded LAN IP buys nothing and breaks on the next DHCP lease. |
+| `VITE_DEV_HOST` | Set to `0.0.0.0` to expose the *client* to the LAN. This, not the proxy target, is what other devices need. |
+| `VITE_API_BASE` | **Build-time.** Baked into the bundle; makes the browser call an absolute API origin directly, bypassing the proxy (the server sends `cors()` headers). Unset by default. |
+
+`VITE_API_TARGET` is **dev-only** — it configures the dev-server proxy and has no
+effect on `vite build`. A statically hosted client (Render static site, S3, Pages)
+therefore needs `VITE_API_BASE`; setting `VITE_API_TARGET` there does nothing and
+leaves the client requesting `/api/...` from the static host, which 404s. Only the
+single-origin deployment (`npm start`, Express serving `client/dist`) needs
+neither.
+
+`strictPort: true` — a silently shifted port (5174, 5175) is the usual reason
+`/api` appears to break, so the dev server fails loudly instead.
+
+## Env files
+
+`server/.env` and `client/.env` both exist, each mirroring a checked-in
+`.env.example`; `.env` is gitignored, `.env.example` is not. The server loads its
+copy through `--env-file-if-exists=.env` in the npm scripts — Node's built-in
+support, no `dotenv` package. Consequences worth knowing:
+
+- Only read **at process start**; `--watch` restarts on source edits, not on
+  `.env` edits.
+- A real environment variable **wins over the file**, which is what makes
+  platform-injected values (Render's `PORT`) work.
+- Running `node src/index.js` directly bypasses the file entirely — use
+  `npm start` / `npm run dev`.
+- [render.yaml](render.yaml) sets its own vars; the backend needs `HOST=0.0.0.0`
+  there or the container is unreachable.
 
 ## Architecture
 
