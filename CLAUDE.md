@@ -211,13 +211,15 @@ on the always-white PDF page: the annotation red, the search highlight yellow /
 orange, and the page placeholder.
 
 - [ThemeToggle.vue](client/src/components/ThemeToggle.vue) is a `role="switch"`
-  button. With no stored choice the app follows the OS **and keeps following it**
-  live via `matchMedia`; flipping the switch pins a theme in localStorage and
-  stops the tracking.
+  button. **Light is the default and the OS preference is deliberately ignored**
+  — a machine set to dark still opens the app light. Dark applies only when the
+  user picked it here, and that choice is remembered in localStorage. Do not
+  reintroduce a `prefers-color-scheme` check: only the stored value may select
+  dark.
 - The inline script in [client/index.html](client/index.html) sets
   `data-theme` **before first paint** from the same storage key, so there is no
-  flash of the wrong theme. Change the key in one place and you must change it
-  in the other.
+  flash of the wrong theme. It repeats the default-light rule, so a change to
+  the rule has to be made in both places — key and logic.
 - `--viewer-bg` exists separately from `--surface-2` because white pages need a
   darker ground in light mode or they disappear into the pane.
 

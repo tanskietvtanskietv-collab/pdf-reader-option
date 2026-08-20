@@ -1,38 +1,23 @@
 <script setup>
-import { onBeforeUnmount, onMounted, ref } from 'vue';
+import { onMounted, ref } from 'vue';
 
 /**
  * Dark / light switch.
  *
- * With no stored choice the app follows the operating system, and keeps
- * following it if the user changes it while the app is open. Flipping the switch
- * pins a theme and stops the app tracking the system. The same key is read by
- * the inline script in index.html so the first paint is already correct.
+ * **Light is the default.** The OS preference is deliberately ignored: a machine
+ * set to dark still opens this app light, and dark is used only when the user
+ * asked for it here. That choice is remembered, and the inline script in
+ * index.html reads the same key so the first paint is already correct.
  */
 
 const STORAGE_KEY = 'pdf-term-reader:theme';
+const DEFAULT_THEME = 'light';
 
-const theme = ref('light');
-let media = null;
-
-function systemTheme() {
-  return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-}
+const theme = ref(DEFAULT_THEME);
 
 function apply(next) {
   theme.value = next;
   document.documentElement.dataset.theme = next;
-}
-
-function onSystemChange(event) {
-  // Only while the user has not pinned a theme of their own.
-  let stored = null;
-  try {
-    stored = localStorage.getItem(STORAGE_KEY);
-  } catch {
-    /* storage unavailable */
-  }
-  if (!stored) apply(event.matches ? 'dark' : 'light');
 }
 
 onMounted(() => {
@@ -42,13 +27,8 @@ onMounted(() => {
   } catch {
     /* storage unavailable */
   }
-  apply(stored === 'dark' || stored === 'light' ? stored : systemTheme());
-
-  media = window.matchMedia?.('(prefers-color-scheme: dark)');
-  media?.addEventListener('change', onSystemChange);
+  apply(stored === 'dark' ? 'dark' : DEFAULT_THEME);
 });
-
-onBeforeUnmount(() => media?.removeEventListener('change', onSystemChange));
 
 function toggle() {
   const next = theme.value === 'dark' ? 'light' : 'dark';

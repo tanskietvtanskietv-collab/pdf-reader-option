@@ -26,7 +26,7 @@ client (Vue 3, Vite)                     server (Express, pdf.js)
 - Markup: red pencil and check stamp with selectable thickness, undo/redo.
 - **Save as PDF** writes the marks into a copy as real PDF annotations; the
   original and its search index are never touched.
-- Dark / light theme that follows the OS until you override it.
+- Light theme by default, with a dark mode you can switch on.
 
 ## Quick start
 
@@ -152,9 +152,10 @@ The destination is always chosen **before** anything is written:
 
 ## Theme
 
-A switch in the header toggles dark and light. With no stored choice the app
-follows the operating system and keeps tracking it live; flipping the switch pins
-a theme in `localStorage`. Both palettes are token sets in
+A switch in the header toggles dark and light. **The app always starts in the
+light theme** — the operating system setting is not consulted, so a machine in
+dark mode still opens this app light. Switching to dark is remembered in
+`localStorage` and applies from then on. Both palettes are token sets in
 [client/src/styles.css](client/src/styles.css), and an inline script in
 `index.html` applies the theme before first paint so there is no flash of the
 wrong colours. Components reference tokens only — a raw colour in a component is
@@ -204,7 +205,7 @@ clamps to 10–60 %, never lets the panel fall under 180 px, resets on double
 click, takes arrow keys when focused, and remembers the width in localStorage.
 
 - **Header** — upload button, file name, live processing status, and a **dark /
-  light theme switch**. It follows your operating system until you flip it, then
+  light theme switch**. Starts light every time until you switch it, then
   remembers your choice.
 - **Left, 85 % by default** — canvas viewer, opening at a **fixed 100 % zoom** and scrolling
   in both directions inside its own pane. The pointer turns into a **hand over
