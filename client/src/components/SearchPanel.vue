@@ -146,7 +146,7 @@ function badgeText(state) {
             class="check"
             :class="{ empty: results[row.id].totalMatches === 0 }"
             :title="`Already searched — ${results[row.id].totalMatches} match(es)`"
-            >✓</span
+            >✔</span
           >
         </span>
 
@@ -198,6 +198,12 @@ function badgeText(state) {
 
 <style scoped>
 .panel {
+  /* One type scale for the panel: primary term, secondary label, meta, tick. */
+  --fs-term: 14px;
+  --fs-label: 12px;
+  --fs-meta: 11px;
+  --fs-tick: 17px;
+
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -222,11 +228,12 @@ function badgeText(state) {
   border-radius: 8px;
   padding: 8px 10px 10px;
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
 .categories legend {
-  font-size: 11px;
+  font-size: var(--fs-meta);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-muted);
@@ -237,7 +244,7 @@ function badgeText(state) {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex: 1;
+  flex: 1 1 96px;
   padding: 6px 8px;
   border-radius: 6px;
   cursor: pointer;
@@ -252,21 +259,24 @@ function badgeText(state) {
 .radio em {
   margin-left: auto;
   font-style: normal;
-  font-size: 11px;
+  font-size: var(--fs-meta);
   color: var(--text-muted);
 }
 
 .actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
 .actions button {
   flex: 1;
+  font-size: var(--fs-label);
 }
 
 .filters {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
 }
@@ -279,14 +289,14 @@ function badgeText(state) {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--fs-label);
   color: var(--text-muted);
   white-space: nowrap;
 }
 
 .summary {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--fs-label);
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
@@ -306,7 +316,7 @@ function badgeText(state) {
 
 .row {
   display: grid;
-  grid-template-columns: 38px 1fr auto;
+  grid-template-columns: 44px 1fr auto;
   align-items: center;
   gap: 8px;
   padding: 6px;
@@ -327,22 +337,24 @@ function badgeText(state) {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 3px;
-  font-size: 11px;
+  gap: 4px;
+  font-size: var(--fs-label);
   color: var(--text-faint);
   font-variant-numeric: tabular-nums;
 }
 
 .row-index .num {
-  min-width: 16px;
+  min-width: 18px;
   text-align: right;
 }
 
-/* Tick = this term has already been searched against the current document. */
+/* Tick = this term has already been searched against the current document.
+   Deliberately the largest glyph in the row: it is what the user scans for. */
 .row-index .check {
-  font-size: 12px;
+  font-size: var(--fs-tick);
+  font-weight: 800;
   line-height: 1;
-  color: #46d18a;
+  color: var(--success);
 }
 
 .row-index .check.empty {
@@ -357,18 +369,20 @@ function badgeText(state) {
 
 .term {
   width: 100%;
+  font-size: var(--fs-term);
   font-family: 'Noto Sans JP', 'Meiryo', system-ui, sans-serif;
 }
 
 .row-meta {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 4px 8px;
   min-height: 16px;
 }
 
 .badge {
-  font-size: 11px;
+  font-size: var(--fs-meta);
   font-weight: 600;
   padding: 1px 7px;
   border-radius: 999px;
@@ -385,8 +399,8 @@ function badgeText(state) {
   background: var(--surface-2);
 }
 .badge.hit {
-  color: #0b2e13;
-  background: #6ee7a0;
+  color: var(--success-text);
+  background: var(--success-bg);
 }
 .badge.miss {
   color: var(--text-muted);
@@ -394,12 +408,12 @@ function badgeText(state) {
 }
 .badge.error {
   color: #fff;
-  background: #d24141;
+  background: var(--danger-strong);
 }
 
 .pages,
 .error-text {
-  font-size: 11px;
+  font-size: var(--fs-meta);
   color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -407,7 +421,7 @@ function badgeText(state) {
 }
 
 .error-text {
-  color: #f08a8a;
+  color: var(--danger);
 }
 
 .row-actions {
@@ -417,7 +431,7 @@ function badgeText(state) {
 }
 
 .counter {
-  font-size: 11px;
+  font-size: var(--fs-meta);
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
   min-width: 34px;
@@ -426,7 +440,7 @@ function badgeText(state) {
 
 .mini {
   padding: 2px 7px;
-  font-size: 12px;
+  font-size: var(--fs-label);
   line-height: 1.2;
 }
 
@@ -434,6 +448,6 @@ function badgeText(state) {
   padding: 20px;
   text-align: center;
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--fs-label);
 }
 </style>

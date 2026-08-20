@@ -1,8 +1,21 @@
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import PdfViewer from './components/PdfViewer.vue';
 import SearchPanel from './components/SearchPanel.vue';
-import { fetchCategories, uploadPdf, searchTerm, searchBatch, releaseDocument } from './api.js';
+import SaveDialog from './components/SaveDialog.vue';
+import ThemeToggle from './components/ThemeToggle.vue';
+import {
+  fetchCategories,
+  uploadPdf,
+  searchTerm,
+  searchBatch,
+  releaseDocument,
+  exportAnnotatedPdf,
+  pickSaveLocation,
+  writePdf,
+  canPickSaveLocation,
+  saveAnnotatedPdfTo,
+} from './api.js';
 
 const categories = ref([]);
 const category = ref('Wakugumi');
@@ -192,12 +205,176 @@ watch(category, () => {
   activeRowId.value = null;
 });
 
+/* -------------------------------------------------------------- save as pdf */
+
+const markCount = ref(0);
+const saving = ref(false);
+
+const suggestedFileName = computed(() => {
+  const base = (doc.value?.fileName ?? 'document').replace(/\.pdf$/i, '');
+  return `${base}-marked.pdf`;
+});
+
+const saveDialogOpen = ref(false);
+const saveError = ref('');
+
+/**
+ * Always choose the destination before anything is written.
+ *
+ * Where the browser has `showSaveFilePicker` (a secure context) that native
+ * dialog is the folder chooser, and it must be opened straight off the click —
+ * it needs that click's user activation, which building the file would consume.
+ * Otherwise the in-app dialog browses folders on the server machine instead.
+ */
+async function savePdf() {
+  if (!doc.value || !markCount.value || saving.value) return;
+  saveError.value = '';
+
+  if (canPickSaveLocation()) {
+    let handle = null;
+    try {
+      handle = await pickSaveLocation(suggestedFileName.value);
+    } catch (error) {
+      if (error?.name === 'AbortError') return; // the user closed the dialog
+    }
+    if (handle) {
+      await writeThroughBrowser(handle);
+      return;
+    }
+  }
+
+  saveDialogOpen.value = true;
+}
+
+async function writeThroughBrowser(handle) {
+  saving.value = true;
+  setStatus('saving', 'Writing the marks into a copy of the PDF…');
+  try {
+    const blob = await exportAnnotatedPdf(doc.value.docId, viewer.value?.exportMarks() ?? []);
+    const name = await writePdf(blob, handle, suggestedFileName.value);
+    setStatus('ready', `Saved ${name}`);
+  } catch (error) {
+    setStatus('error', `Could not save: ${error.message}`);
+  } finally {
+    saving.value = false;
+  }
+}
+
+/** Destination chosen in the in-app dialog: the server writes the file. */
+async function saveToFolder({ destination, fileName, overwrite = false }) {
+  saving.value = true;
+  saveError.value = '';
+  setStatus('saving', 'Writing the marks into a copy of the PDF…');
+  try {
+    const marks = viewer.value?.exportMarks() ?? [];
+    const saved = await saveAnnotatedPdfTo(doc.value.docId, marks, {
+      destination,
+      fileName,
+      overwrite,
+    });
+    saveDialogOpen.value = false;
+    setStatus('ready', `Saved to ${saved.path}`);
+  } catch (error) {
+    if (error.code === 'EEXIST_PDF') {
+      // Never overwrite silently; ask, then retry with the flag.
+      if (window.confirm(`${error.message}. Replace it?`)) {
+        await saveToFolder({ destination, fileName, overwrite: true });
+        return;
+      }
+      saveError.value = 'Pick another name or folder.';
+    } else {
+      saveError.value = error.message;
+    }
+    setStatus('ready', '');
+  } finally {
+    saving.value = false;
+  }
+}
+
+/* ---------------------------------------------------------- split resizing */
+
+const PANEL_DEFAULT = 15; // viewer 85 % / search panel 15 %
+const PANEL_MIN = 10;
+const PANEL_MAX = 60;
+const PANEL_MIN_PX = 180; // below this the term rows stop being usable. Chosen so
+                          // the 15 % default survives on any window >= 1200px.
+const PANEL_STORAGE_KEY = 'pdf-term-reader:panel-width';
+
+const layoutEl = ref(null);
+const resizing = ref(false);
+const panelWidth = ref(readStoredPanelWidth());
+
+const layoutColumns = computed(() => `1fr 6px ${panelWidth.value}%`);
+
+function readStoredPanelWidth() {
+  try {
+    const stored = Number(localStorage.getItem(PANEL_STORAGE_KEY));
+    if (Number.isFinite(stored) && stored >= PANEL_MIN && stored <= PANEL_MAX) return stored;
+  } catch {
+    /* storage can be unavailable (private mode); the default is fine */
+  }
+  return PANEL_DEFAULT;
+}
+
+function storePanelWidth() {
+  try {
+    localStorage.setItem(PANEL_STORAGE_KEY, String(Math.round(panelWidth.value * 10) / 10));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Percentage clamp that also enforces a pixel floor for the term list. */
+function clampPanel(percent) {
+  const width = layoutEl.value?.clientWidth ?? 0;
+  const min = width ? Math.max(PANEL_MIN, (PANEL_MIN_PX / width) * 100) : PANEL_MIN;
+  return Math.min(Math.max(percent, min), PANEL_MAX);
+}
+
+function startResize(event) {
+  resizing.value = true;
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+}
+
+function onResize(event) {
+  if (!resizing.value || !layoutEl.value) return;
+  const rect = layoutEl.value.getBoundingClientRect();
+  // Dragging the divider left grows the panel, right shrinks it.
+  panelWidth.value = clampPanel(((rect.right - event.clientX) / rect.width) * 100);
+}
+
+function endResize(event) {
+  if (!resizing.value) return;
+  resizing.value = false;
+  event.currentTarget.releasePointerCapture?.(event.pointerId);
+  storePanelWidth();
+}
+
+function nudgePanel(delta) {
+  panelWidth.value = clampPanel(panelWidth.value + delta);
+  storePanelWidth();
+}
+
+function resetPanelWidth() {
+  panelWidth.value = PANEL_DEFAULT;
+  storePanelWidth();
+}
+
+// A narrower window can push the stored percentage below the pixel floor.
+function reclampPanel() {
+  panelWidth.value = clampPanel(panelWidth.value);
+}
+onMounted(() => window.addEventListener('resize', reclampPanel));
+onBeforeUnmount(() => window.removeEventListener('resize', reclampPanel));
+
 const statusLabel = computed(() => {
   switch (status.state) {
     case 'uploading':
       return `Uploading ${status.progress}%`;
     case 'parsing':
       return 'Parsing on server';
+    case 'saving':
+      return 'Saving';
     case 'ready':
       return 'Ready';
     case 'error':
@@ -211,7 +388,7 @@ const statusLabel = computed(() => {
 <template>
   <div
     class="app"
-    :class="{ dragging }"
+    :class="{ dragging, resizing }"
     @dragover.prevent="dragging = true"
     @dragleave.prevent="onDragLeave"
     @drop.prevent="onDrop"
@@ -227,6 +404,21 @@ const statusLabel = computed(() => {
         <input ref="fileInput" type="file" accept="application/pdf,.pdf" hidden @change="onFileChosen" />
         <span v-if="doc" class="file-name" :title="doc.fileName">{{ doc.fileName }}</span>
         <span v-else class="file-name muted">No file loaded</span>
+        <button
+          v-if="doc"
+          type="button"
+          class="primary"
+          @click="savePdf"
+          :disabled="!markCount || saving"
+          :title="
+            markCount
+              ? 'Save a copy with your marks burned in'
+              : 'Draw or stamp something first'
+          "
+        >
+          {{ saving ? 'Saving…' : 'Save as PDF…' }}
+          <span v-if="markCount" class="mark-count">{{ markCount }}</span>
+        </button>
         <button v-if="doc" type="button" class="ghost" @click="closeDocument">Close</button>
       </div>
 
@@ -235,9 +427,11 @@ const statusLabel = computed(() => {
         <span class="status-label">{{ statusLabel }}</span>
         <span class="status-message">{{ status.message }}</span>
       </div>
+
+      <ThemeToggle />
     </header>
 
-    <main class="layout">
+    <main class="layout" ref="layoutEl" :style="{ gridTemplateColumns: layoutColumns }">
       <PdfViewer
         ref="viewer"
         :doc-id="doc?.docId ?? null"
@@ -245,7 +439,31 @@ const statusLabel = computed(() => {
         :highlights="highlights"
         :active-index="activeIndex"
         @error="setStatus('error', $event)"
+        @marks="markCount = $event"
       />
+
+      <div
+        class="resizer"
+        :class="{ active: resizing }"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize the search panel"
+        :aria-valuenow="Math.round(panelWidth)"
+        :aria-valuemin="PANEL_MIN"
+        :aria-valuemax="PANEL_MAX"
+        tabindex="0"
+        title="Drag to resize — double-click to reset"
+        @pointerdown="startResize"
+        @pointermove="onResize"
+        @pointerup="endResize"
+        @pointercancel="endResize"
+        @dblclick="resetPanelWidth"
+        @keydown.left.prevent="nudgePanel(1)"
+        @keydown.right.prevent="nudgePanel(-1)"
+      >
+        <span class="grip"></span>
+      </div>
+
       <SearchPanel
         :categories="categories"
         :category="category"
@@ -260,6 +478,16 @@ const statusLabel = computed(() => {
         @step-match="stepMatch"
       />
     </main>
+
+    <SaveDialog
+      :open="saveDialogOpen"
+      :suggested-name="suggestedFileName"
+      :mark-count="markCount"
+      :busy="saving"
+      :error="saveError"
+      @close="saveDialogOpen = false"
+      @save="saveToFolder"
+    />
 
     <div v-if="dragging" class="drop-hint">Drop the PDF to upload</div>
   </div>
@@ -314,6 +542,17 @@ const statusLabel = computed(() => {
   color: var(--text-faint);
 }
 
+/* Number of marks that would be burned into the saved copy. */
+.mark-count {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 25%);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
 .status {
   margin-left: auto;
   display: flex;
@@ -333,14 +572,15 @@ const statusLabel = computed(() => {
 }
 
 .status[data-state='ready'] .dot {
-  background: #46d18a;
+  background: var(--success);
 }
 .status[data-state='error'] .dot {
-  background: #e05555;
+  background: var(--danger-strong);
 }
 .status[data-state='uploading'] .dot,
+.status[data-state='saving'] .dot,
 .status[data-state='parsing'] .dot {
-  background: #f0b429;
+  background: var(--warning);
   animation: pulse 1s ease-in-out infinite;
 }
 
@@ -362,12 +602,57 @@ const statusLabel = computed(() => {
   }
 }
 
-/* 65 / 35 split required by the layout spec. Both columns scroll internally. */
+/* Viewer / divider / search panel. Columns come from `layoutColumns`, which
+   defaults to 85 % / 15 % and is dragged by the .resizer. Both panes scroll
+   internally — the window never does. */
 .layout {
   display: grid;
-  grid-template-columns: 65fr 35fr;
   min-height: 0;
   overflow: hidden;
+}
+
+.resizer {
+  position: relative;
+  cursor: col-resize;
+  background: var(--border);
+  touch-action: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.resizer::before {
+  /* Widens the pointer target well past the 6px visual line. */
+  content: '';
+  position: absolute;
+  inset: 0 -5px;
+}
+
+.resizer:hover,
+.resizer:focus-visible,
+.resizer.active {
+  background: var(--accent);
+  outline: none;
+}
+
+.grip {
+  width: 2px;
+  height: 26px;
+  border-radius: 2px;
+  background: var(--text-faint);
+  pointer-events: none;
+}
+
+.resizer:hover .grip,
+.resizer:focus-visible .grip,
+.resizer.active .grip {
+  background: #fff;
+}
+
+/* While dragging, keep the cursor and stop the pointer selecting text. */
+.app.resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .layout > * {
@@ -381,7 +666,7 @@ const statusLabel = computed(() => {
   inset: 0;
   display: grid;
   place-items: center;
-  background: rgb(10 12 16 / 72%);
+  background: var(--overlay);
   font-size: 18px;
   pointer-events: none;
   border: 2px dashed var(--accent);

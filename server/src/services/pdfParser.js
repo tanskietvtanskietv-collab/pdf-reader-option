@@ -127,10 +127,15 @@ function isFullWidth(cp) {
  *   `text` is NFKC-normalised; the typed arrays project any index of `text` back
  *   onto (item, character) pairs so bounding boxes can be reconstructed.
  */
-export async function parsePdf(buffer) {
+/**
+ * Open a PDF with the options Japanese drawings need. Shared with the annotation
+ * writer so both paths decode Adobe-Japan1 text identically.
+ * @returns {Promise<{ pdfjs:object, doc:object }>} caller must `doc.destroy()`.
+ */
+export async function openDocument(buffer) {
   const pdfjs = await loadPdfjs();
   const { cMapUrl, standardFontDataUrl } = pdfjsAssets();
-  const loadingTask = pdfjs.getDocument({
+  const doc = await pdfjs.getDocument({
     data: new Uint8Array(buffer),
     cMapUrl,
     cMapPacked: true,
@@ -139,9 +144,12 @@ export async function parsePdf(buffer) {
     isEvalSupported: false,
     useSystemFonts: false,
     verbosity: 0,
-  });
+  }).promise;
+  return { pdfjs, doc };
+}
 
-  const doc = await loadingTask.promise;
+export async function parsePdf(buffer) {
+  const { doc } = await openDocument(buffer);
   const pages = [];
   const totalPages = doc.numPages;
 

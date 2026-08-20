@@ -11,8 +11,17 @@ coordinates. The Vue client renders the PDF and paints the server's coordinates
 over it. Two fixed terminology dictionaries drive the search panel: **Wakugumi**
 (73 terms) and **Jikugumi** (88 terms).
 
+On top of search the viewer offers red pencil / check-stamp markup, and **Save as
+PDF** writes those marks into a copy of the document server-side.
+
 The server is the single source of truth for counts, coordinates, and the
 dictionaries. The client is a renderer — it must never re-implement matching.
+
+**One idea explains most of this codebase:** every position — search hits,
+annotations, exported ink — is expressed in **PDF points at scale 1, top-left
+origin**, and converted to pixels only at the moment of drawing. Zoom, pan, the
+resizable split and the export all stay correct for free because of it. Anything
+that stores a screen pixel is a bug waiting for the next zoom change.
 
 ## Commands
 
@@ -79,6 +88,10 @@ support, no `dotenv` package. Consequences worth knowing:
   `npm start` / `npm run dev`.
 - [render.yaml](render.yaml) sets its own vars; the backend needs `HOST=0.0.0.0`
   there or the container is unreachable.
+- **`HOST` must stay `0.0.0.0`, never a specific LAN IP.** Pinning one interface
+  excludes `127.0.0.1` — which is exactly what the Vite proxy targets — so every
+  `/api` call starts returning 500 while `netstat` still shows a listener on
+  :3000. `0.0.0.0` already covers the LAN address.
 
 ## Architecture
 
@@ -89,25 +102,46 @@ upload ──► parsePdf ──► page index (memory) ─┐
 query ──► NFKC normalize ──► escaped regex ──┘                          │
                                                                         ▼
                             client: pdf.js canvas + absolutely positioned overlays
+                                                                        │
+      marks drawn on the client (PDF points) ──► burnAnnotations ──► /Ink annotations
+                                                        │                 │
+                                          the cached original is           ▼
+                                          never modified          browser save dialog
+                                                                  or writeToFolder()
 ```
 
-- [server/src/services/pdfParser.js](server/src/services/pdfParser.js) — pdf.js
-  extraction and **all** coordinate maths. `parsePdf` walks pages; `buildPageIndex`
-  is the pure function that turns pdf.js text items into the searchable index;
-  `rectsForRange` projects a match range back onto boxes.
-- [server/src/services/search.js](server/src/services/search.js) — regex execution,
-  counting, and match → coordinate conversion. Owns no geometry of its own.
-- [server/src/services/documentStore.js](server/src/services/documentStore.js) —
-  the entire session cache. **Swapping in Redis means replacing only this file**;
-  nothing else touches storage.
-- [server/src/utils/normalize.js](server/src/utils/normalize.js) /
-  [regex.js](server/src/utils/regex.js) — the two correctness-critical helpers
-  (see below).
-- [client/src/components/PdfViewer.vue](client/src/components/PdfViewer.vue) —
-  canvas rendering, zoom, lazy page window, highlight overlay.
-- [client/src/components/SearchPanel.vue](client/src/components/SearchPanel.vue) —
-  dictionary rows, count badges, searched ticks. Holds only per-row *edits*;
-  results live in [App.vue](client/src/App.vue) keyed by `${category}#${index}`.
+**Server**
+
+- [pdfParser.js](server/src/services/pdfParser.js) — pdf.js extraction and **all**
+  coordinate maths. `parsePdf` walks pages; `buildPageIndex` is the pure function
+  that turns pdf.js text items into the searchable index; `rectsForRange`
+  projects a match range back onto boxes; `openDocument` is shared with the
+  annotation writer.
+- [search.js](server/src/services/search.js) — regex execution, counting, and
+  match → coordinate conversion. Owns no geometry of its own.
+- [documentStore.js](server/src/services/documentStore.js) — the entire session
+  cache. **Swapping in Redis means replacing only this file**; nothing else
+  touches storage.
+- [annotate.js](server/src/services/annotate.js) — writes client marks into a PDF
+  copy as `/Ink` annotations, using pdf.js rather than a second PDF library.
+- [exportTargets.js](server/src/services/exportTargets.js) — folder browsing and
+  file writing for Save As, plus the path confinement that keeps it safe.
+- [normalize.js](server/src/utils/normalize.js) / [regex.js](server/src/utils/regex.js)
+  — the two correctness-critical helpers (see below).
+
+**Client**
+
+- [PdfViewer.vue](client/src/components/PdfViewer.vue) — canvas rendering, zoom
+  (toolbar and Ctrl+wheel), hand-tool panning, the pencil / check-stamp markup
+  layer, lazy page window, highlight overlay.
+- [SearchPanel.vue](client/src/components/SearchPanel.vue) — dictionary rows,
+  count badges, searched ticks. Holds only per-row *edits*; results live in
+  [App.vue](client/src/App.vue) keyed by `${category}#${index}`.
+- [SaveDialog.vue](client/src/components/SaveDialog.vue) — folder picker for when
+  the browser cannot open its own; [ThemeToggle.vue](client/src/components/ThemeToggle.vue)
+  — the dark / light switch.
+- [api.js](client/src/api.js) — every backend call in one place, plus the
+  save-dialog helpers (`pickSaveLocation`, `writePdf`).
 
 ## The search pipeline (the part that needs care)
 
@@ -159,14 +193,38 @@ merged `bounds` plus the individual `rects`.
 | GET | `/api/pdf/:docId/page/:n` | Page geometry; `?include=text` adds the normalised text layer. Returns geometry, **not** a rasterised image (that would need a native canvas binding). |
 | POST | `/api/pdf/search` | `{ docId, query, category }` → `{ totalMatches, pages[], results[] }` |
 | POST | `/api/pdf/search/batch` | Whole category in one round trip; **counts only, no coordinates** — the client fetches those when a row becomes active. |
+| POST | `/api/pdf/:docId/export` | Save As: `{ marks: [{ page, points[], width }] }` in **viewport points** -> a PDF copy with the marks burned in as `/Ink` annotations. Streams the bytes back, or writes to disk when `destination` is given. |
+| GET | `/api/folders?path=` | Folders on the server machine for the save dialog; empty `path` = drives + shortcuts. |
+| GET | `/api/folders/enabled` | Whether server-side saving is on, and its root. |
 | GET | `/api/categories` | Dictionaries; the client never hardcodes them. |
 
 Search options: `caseInsensitive` (default true), `looseSpacing` (whitespace
 between every character, default false), `padding` (points, default 0.5).
 
+## Theming
+
+Two palettes, one token set, in [client/src/styles.css](client/src/styles.css):
+`:root` / `:root[data-theme='light']` is light, `:root[data-theme='dark']` is
+dark. **Components must only reference tokens** — a raw hex in a component is a
+bug in one of the two themes. The few deliberate exceptions are things that sit
+on the always-white PDF page: the annotation red, the search highlight yellow /
+orange, and the page placeholder.
+
+- [ThemeToggle.vue](client/src/components/ThemeToggle.vue) is a `role="switch"`
+  button. With no stored choice the app follows the OS **and keeps following it**
+  live via `matchMedia`; flipping the switch pins a theme in localStorage and
+  stops the tracking.
+- The inline script in [client/index.html](client/index.html) sets
+  `data-theme` **before first paint** from the same storage key, so there is no
+  flash of the wrong theme. Change the key in one place and you must change it
+  in the other.
+- `--viewer-bg` exists separately from `--surface-2` because white pages need a
+  darker ground in light mode or they disappear into the pane.
+
 ## UI layout and scroll model
 
-65 / 35 split, and **the browser window never scrolls** — `html, body, #app` are
+Split defaults to **85 / 15** (viewer / search panel) and is user-draggable — see
+below. **The browser window never scrolls** — `html, body, #app` are
 `overflow: hidden`, `.layout` and both columns carry `overflow: hidden` plus
 `min-height/min-width: 0`, and each pane owns its scroller with
 `overscroll-behavior: contain`.
@@ -175,14 +233,108 @@ between every character, default false), `padding` (points, default 0.5).
   width / fit page remain available from the toolbar. The scroll container uses
   block layout with `margin: 0 auto` per page — flex `align-items: center` clips
   the left edge of a page wider than the pane and makes it unreachable.
+- **Annotations** (`tool` = `pan` | `pencil` | `check`). Pencil draws red
+  freehand, the check stamp drops a red tick where you click, and both take the
+  thickness from the toolbar `select`. Marks are stored **in PDF points at scale
+  1** — the same contract as search hits — and rendered into a per-page
+  `<svg viewBox="0 0 pageW pageH">` sized to the page box, so the browser scales
+  them with the zoom and they stay welded to the drawing instead of drifting.
+  Storing screen pixels here would be the obvious mistake. The SVG is
+  `pointer-events: none`; the scroll container owns all pointer handling.
+  Strokes lock to the page they started on (`pdfPointAt(..., lockedIndex)`), and
+  points are pushed rather than copied — `ref()` is deeply reactive, and
+  rebuilding the array per `pointermove` makes a long stroke quadratic.
+  Annotations live in memory only and are cleared when a new document loads —
+  until **Save as PDF**, which posts them to `POST /api/pdf/:docId/export`.
+- **Shortcuts** (window `keydown` in `PdfViewer`): `Esc` returns to the hand tool
+  and discards any half-drawn stroke; `Ctrl/Cmd+Z` undoes, `Ctrl/Cmd+Y` (and
+  `Ctrl+Shift+Z`, since Cmd+Y is not redo on macOS) redoes. The handler bails out
+  via `isTypingTarget()` when focus is in an input/textarea/select — otherwise
+  Ctrl+Z in a search-panel term field would delete a drawn mark instead of
+  undoing the typing. Drawing a new mark drops the redo stack; `Clear` pushes the
+  marks onto it **reversed**, so repeated redo restores them in draw order.
+- **Hand tool.** Hovering the page area shows `cursor: grab`, and holding the
+  left button drags the document (`grabbing` while held). Each `pointermove`
+  scrolls to `origin.scroll - (client - origin.client)` — computed from the drag
+  origin, never accumulated, so hitting a scroll edge and dragging back resumes
+  exactly instead of drifting. `pointerType === 'touch'` is skipped: touch
+  devices already pan natively and handling both moves the page twice.
+- **Ctrl/Cmd + wheel zooms the viewer**, and only the viewer: the listener lives
+  on `.viewer-scroll` and is registered with `{ passive: false }` by hand,
+  because `preventDefault()` (which suppresses the browser's own page zoom) is
+  ignored on a passive listener. A plain wheel is never touched, so normal
+  scrolling still works.
+- Zoom is **cursor-anchored** via `zoomAt()`: the PDF point under the pointer is
+  read *before* the change and the scroll offset is corrected *after*
+  `nextTick()`, from the element's fresh rect. Two subtleties keep a fast wheel
+  burst from drifting — `pointOn()` derives the current scale from
+  `rect.width / page.width` rather than `scale.value` (which is already newer
+  than the flushed layout), and a `zoomToken` lets only the newest zoom of a
+  burst apply its correction. Toolbar +/−/100 % go through the same path,
+  anchored on the viewport centre.
 - Pages render lazily in a ±3 page window around the visible set
-  (`RENDER_WINDOW`); canvases outside it are zeroed. Any zoom change invalidates
-  every rendered canvas.
+  (`RENDER_WINDOW`); canvases outside it are zeroed. A zoom change stretches the
+  existing bitmaps immediately and debounces the sharp re-render by 110 ms —
+  re-rendering per wheel tick would thrash, and clearing first would flash the
+  placeholder.
+- The divider between the panes is a `role="separator"` element in
+  [App.vue](client/src/App.vue) driving `grid-template-columns: 1fr 6px {n}%`
+  inline. `clampPanel()` enforces 10–60 % **and** a 180 px floor — the pixel floor
+  is why the 15 % default only survives on windows ≥ 1200 px. Width persists to
+  localStorage; double click resets, arrow keys nudge when focused. Pointer
+  capture on `pointerdown` is what keeps the drag alive over the canvas.
+- `PdfViewer`'s `ResizeObserver` is debounced 120 ms for this reason: without it,
+  dragging the divider while a fit mode is active re-renders every canvas on
+  every `pointermove`.
 - Right panel: category radios + actions stay pinned, only the term list scrolls.
   Enter on a row runs that search, scrolls the viewer to the first hit, updates
   the `Found: n` badge and puts a **✓ next to the row number** (green = found,
   grey = searched with zero hits). The tick means "searched", the badge means
   "found".
+
+## Saving an annotated copy
+
+[server/src/services/annotate.js](server/src/services/annotate.js) writes the marks
+with **pdf.js itself** — no `pdf-lib`, no second PDF library. Marks go into
+`doc.annotationStorage` under keys prefixed `pdfjs_internal_editor_` with
+`annotationType: 15` (`AnnotationEditorType.INK`), then `doc.saveDocument()`
+appends them as an incremental update, leaving the original bytes and the text
+layer intact (the export re-parses and still searches identically).
+
+Two things are easy to get wrong here:
+
+- **Coordinates.** Marks arrive in viewport space (top-left origin); PDF user
+  space is bottom-left. `viewport.convertToPdfPoint()` does the conversion *and*
+  handles a page /Rotate, which hand-rolled arithmetic would get wrong on rotated
+  drawings.
+- **The `paths.lines` shape.** pdf.js reads the first point from indices 4/5,
+  then one 6-slot group per point; slot 0 must be `NaN` for a lineTo, or the
+  numbers are consumed as bezier control points instead.
+
+The cached original is never modified, so searching and re-exporting keep working
+off the untouched file.
+
+**The destination is always chosen before anything is written**, by one of two
+routes:
+
+1. `showSaveFilePicker` when the page is in a **secure context** (https, or
+   localhost). It must be opened straight off the click — it needs that click's
+   transient user activation, and building the file first would consume it.
+2. Otherwise [SaveDialog.vue](client/src/components/SaveDialog.vue) browses
+   folders **on the server machine** via `GET /api/folders` and the server writes
+   the file ([exportTargets.js](server/src/services/exportTargets.js)).
+
+Route 2 is an HTTP-driven filesystem write. By default it is **unconfined** —
+`listFolders` serves the drive list at the top level plus Desktop/Documents/
+Downloads/Home shortcuts, so it behaves like a desktop Save As. `EXPORT_ROOT`
+confines it to one tree, `EXPORT_ENABLED=false` disables it. File names are
+always reduced to a basename and forced to `.pdf`, and an existing file 409s
+unless `overwrite` is set.
+
+In **confined** mode the Windows trap matters: `path.resolve(root, 'C:Windows')`
+resolves a drive-relative path against the *process cwd*, not the root, and
+`path.relative` then reports an innocent-looking result — so `resolveFolder()`
+rejects absolute, UNC and drive-qualified inputs **before** resolving.
 
 ## Session cache
 
@@ -207,7 +359,8 @@ terms after NFKC and both must survive.
 
 ## Tests
 
-[server/test/run-tests.mjs](server/test/run-tests.mjs), `node:test`, three tiers:
+[server/test/run-tests.mjs](server/test/run-tests.mjs), `node:test`, 37 tests in
+four tiers. Everything except tier 3 runs without `node_modules`:
 
 1. Unit — normalisation, regex escaping, every dictionary term compiling.
 2. Geometry — `buildPageIndex` fed synthetic pdf.js text items, so placement,
@@ -218,7 +371,16 @@ terms after NFKC and both must survive.
    `npm install`.
 3. Integration — a hand-built PDF fixture ([test/make-fixture.mjs](server/test/make-fixture.mjs))
    with a CID font (`UniJIS-UCS2-H`), half-width katakana with a separate voiced
-   mark, and a rotated label. These self-skip if `pdfjs-dist` is missing.
+   mark, and a rotated label. These self-skip if `pdfjs-dist` is missing. The
+   export tests live here too: marks burn in as `/Ink`, land in the right place
+   after the top-left → bottom-left flip, and **the exported file is re-parsed
+   and searched** to prove the text layer survived.
+4. Save targets — path confinement and file-name sanitising for
+   [exportTargets.js](server/src/services/exportTargets.js). The confinement test
+   walks twelve escape shapes (`..`, UNC, `D:\`, and the drive-relative
+   `C:Windows` that slips past a naive resolve-then-check). It sets
+   `EXPORT_ROOT` itself, so remember to `delete process.env.EXPORT_ROOT` in any
+   test that expects the default unconfined behaviour.
 
 pdf.js needs `cmaps/` and `standard_fonts/` passed explicitly or Japanese
 (Adobe-Japan1) drawings decode to garbage — server resolves them from

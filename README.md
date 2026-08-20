@@ -3,15 +3,30 @@
 Web based PDF reader that parses construction drawings on a Node.js backend, runs
 full text search over the extracted text layer, and returns **hit counts plus
 bounding box coordinates** that the Vue client paints over the rendered page.
+Drawings can then be marked up in red and saved as a new PDF.
 
 ```
 client (Vue 3, Vite)                     server (Express, pdf.js)
-┌────────────────────────┬──────────┐    ┌──────────────────────────────────┐
-│ PDF viewer 65%         │ search   │    │ POST /api/pdf/upload   parse+cache│
-│  canvas + highlights   │ panel 35%│ ─► │ POST /api/pdf/search   NFKC+regex │
-│  zoom / page counter   │ radios   │ ◄─ │  → { totalMatches, results[] }    │
-└────────────────────────┴──────────┘    └──────────────────────────────────┘
+┌──────────────────────────┬────────┐    ┌──────────────────────────────────┐
+│ PDF viewer  85%          │search  │    │ POST /api/pdf/upload  parse+cache│
+│  canvas + highlights     │ panel  │ ─► │ POST /api/pdf/search  NFKC+regex │
+│  zoom / pan / markup     │ 15%    │ ◄─ │ POST /api/pdf/../export  -> /Ink │
+└──────────────────────────┴────────┘    └──────────────────────────────────┘
+       drag the divider ⇔ both sides resize
 ```
+
+**What it does**
+
+- Full text search of two fixed dictionaries — **Wakugumi** (73 terms) and
+  **Jikugumi** (88 terms) — with per-term hit counts and highlighted boxes.
+- Japanese-aware matching: half-width and full-width kana, `ＷＦ`/`WF`, and terms
+  full of regex characters like `(H)`, `24-`, `CH=` and `+レ` all just work.
+- Viewer: fixed 100 % start, Ctrl+wheel zoom, hand-tool panning, lazy page
+  rendering, a resizable split.
+- Markup: red pencil and check stamp with selectable thickness, undo/redo.
+- **Save as PDF** writes the marks into a copy as real PDF annotations; the
+  original and its search index are never touched.
+- Dark / light theme that follows the OS until you override it.
 
 ## Quick start
 
@@ -47,6 +62,9 @@ themselves automatically until `npm install` has run in `server/`.
 | `GET` | `/api/pdf/:docId/page/:pageNumber` | Page geometry for the viewer; `?include=text` also returns the normalised text layer. |
 | `POST` | `/api/pdf/search` | `{ docId, query, category }` → `{ query, totalMatches, pages[], results[] }` |
 | `POST` | `/api/pdf/search/batch` | `{ docId, category }` → one count row per dictionary term, in a single round trip. |
+| `POST` | `/api/pdf/:docId/export` | **Save As.** `{ marks: [{ page, points[], width }] }` -> a copy of the PDF with the marks burned in as standard `/Ink` annotations. With `destination` + `fileName` the server writes it into that folder instead of streaming it back. The cached original is untouched. |
+| `GET` | `/api/folders?path=` | Sub-folders of a directory on the server machine, for the save dialog. An empty `path` returns the drive list plus Desktop/Documents/Downloads shortcuts. Restricted to `EXPORT_ROOT` when that is set. |
+| `GET` | `/api/folders/enabled` | Whether server-side saving is available, and the root it is confined to. |
 | `DELETE` | `/api/pdf/:docId` | Drops the cached index and the temp file. |
 | `GET` | `/api/categories` | The two dictionaries (single source of truth for client and server). |
 | `GET` | `/api/health` | Uptime, cached document count, heap usage. |
@@ -101,6 +119,47 @@ Options accepted by both search endpoints: `caseInsensitive` (default `true`),
    Rotated labels (vertical CAD dimensions) are handled through the item angle,
    so the returned box stays axis aligned and upright.
 
+## Markup and saving
+
+The pencil and check stamp write into an SVG layer whose `viewBox` is the page
+box, so every mark is stored in **PDF points at scale 1** — the same units search
+hits use. Marks therefore stay welded to the drawing through zoom, pan and a
+resize, and stroke widths scale with the document. Undo/redo (`Ctrl+Z`/`Ctrl+Y`)
+is a two-stack model; `Clear` is recoverable because it pushes the marks onto the
+redo stack in reverse.
+
+**Save as PDF** posts the marks to `POST /api/pdf/:docId/export`, where
+[annotate.js](server/src/services/annotate.js) writes them into a copy of the
+document as standard `/Ink` annotations — using pdf.js itself, so there is no
+second PDF library in the tree. `viewport.convertToPdfPoint()` performs the
+top-left → bottom-left flip and handles pages with a `/Rotate` entry. The cached
+original is never modified, and the exported file remains fully searchable.
+
+The destination is always chosen **before** anything is written:
+
+- In a **secure context** (https, or `http://localhost`) the browser's own Save As
+  dialog is used — the real OS one.
+- Otherwise an in-app dialog browses folders on the machine running the server,
+  which then writes the file. It opens on "This PC" with the drive list plus
+  Desktop / Documents / Downloads shortcuts.
+
+> **Security.** The second route is a filesystem write driven by an HTTP request,
+> and it is unrestricted by default so it behaves like a normal Save As. If the
+> API is reachable from your network, set `EXPORT_ROOT` to confine it to one
+> folder tree, or `EXPORT_ENABLED=false` to switch it off. File names are always
+> reduced to a basename and forced to `.pdf`, and an existing file is never
+> overwritten without confirmation.
+
+## Theme
+
+A switch in the header toggles dark and light. With no stored choice the app
+follows the operating system and keeps tracking it live; flipping the switch pins
+a theme in `localStorage`. Both palettes are token sets in
+[client/src/styles.css](client/src/styles.css), and an inline script in
+`index.html` applies the theme before first paint so there is no flash of the
+wrong colours. Components reference tokens only — a raw colour in a component is
+a bug in one of the two themes.
+
 ## Memory management
 
 The parsed spatial index lives in process memory keyed by `docId`; the PDF bytes
@@ -130,6 +189,8 @@ effect on a production build.
 | `DOC_SWEEP_MS` | `300000` | Expiry sweep interval |
 | `DOC_MAX` | `12` | Max cached documents |
 | `SEARCH_MAX_RESULTS` | `5000` | Coordinate cap per search (counts stay exact) |
+| `EXPORT_ROOT` | unset (anywhere) | Confines the save dialog to one folder tree |
+| `EXPORT_ENABLED` | `true` | `false` disables saving to a server folder entirely |
 | `VITE_API_TARGET` | `http://127.0.0.1:3000` | **Dev only.** Backend the Vite dev proxy forwards to (keep it on loopback) |
 | `VITE_DEV_HOST` | unset | Set to `0.0.0.0` to expose the dev client on the LAN |
 | `VITE_API_BASE` | unset | **Build time.** Absolute API origin baked into the bundle; required when the client is hosted statically, apart from the backend |
@@ -137,14 +198,34 @@ effect on a production build.
 ## Layout
 
 The browser window itself never scrolls: `html`/`body` are locked and each pane
-owns its own scroll area.
+owns its own scroll area. The split defaults to **85 % / 15 %** and is draggable:
+grab the divider and move it left or right and both sides resize together. It
+clamps to 10–60 %, never lets the panel fall under 180 px, resets on double
+click, takes arrow keys when focused, and remembers the width in localStorage.
 
-- **Header** — upload button, file name, live processing status.
-- **Left 65 %** — canvas viewer, opening at a **fixed 100 % zoom** and scrolling
-  in both directions inside its own pane. Zoom in/out, zoom percentage, 100 %,
-  fit width/page, page counter, lazy rendering with a ±3 page window, highlight
+- **Header** — upload button, file name, live processing status, and a **dark /
+  light theme switch**. It follows your operating system until you flip it, then
+  remembers your choice.
+- **Left, 85 % by default** — canvas viewer, opening at a **fixed 100 % zoom** and scrolling
+  in both directions inside its own pane. The pointer turns into a **hand over
+  the page — press and hold the left button to drag the drawing around**.
+  **Ctrl (or Cmd) + mouse scroll zooms**
+  while the pointer is over the page — cursor-anchored, so the point under the
+  cursor stays put, and the browser's own page zoom is suppressed there only; a
+  plain scroll still scrolls. Toolbar zoom in/out, zoom percentage, 100 %, fit
+  width/page, page counter, lazy rendering with a ±3 page window, highlight
   overlay. Pages wider than the pane overflow to the right and stay reachable.
-- **Right 35 %** — `Wakugumi` / `Jikugumi` radios, one editable input per term
+  **Markup tools**: a red pencil for freehand notes and a red check stamp, both
+  with a thickness selector (thin / medium / thick / extra), plus undo and clear.
+  **Esc** drops back to the hand tool, **Ctrl+Z** undoes and **Ctrl+Y** redoes
+  (ignored while a search field has focus, so text editing keeps its own undo).
+  Marks are held in PDF points, so they stay locked to the drawing at any zoom.
+  **Save as PDF…** in the header always asks for the destination first, then
+  writes the marks into a copy of the document as real PDF ink annotations —
+  through the browser's own save dialog where the page is in a secure context,
+  otherwise through an in-app folder browser that saves on the server machine. The original stays untouched and the saved copy
+  is still fully searchable.
+- **Right, 15 % by default** — `Wakugumi` / `Jikugumi` radios, one editable input per term
   with a `Found: n` badge, page list, and prev/next match navigation. `Enter` in
   a term field runs that search and puts a **✓ next to the row number** to mark
   it as already searched (grey when the term was not found, green when it was);
@@ -155,15 +236,23 @@ owns its own scroll area.
 
 ```
 server/src/
-  routes/pdf.js             upload / page / search endpoints
-  services/pdfParser.js     pdf.js extraction, page index, bounding box maths
-  services/search.js        regex execution, counts, match -> coordinates
-  services/documentStore.js session cache, TTL, eviction, temp files
-  utils/normalize.js        NFKC with an index map
-  utils/regex.js            escaping + query compilation
-  data/categories.js        the two dictionaries
+  index.js                   express app, /api/categories, /api/folders, static client
+  routes/pdf.js              upload / page / search / export endpoints
+  services/pdfParser.js      pdf.js extraction, page index, bounding box maths
+  services/search.js         regex execution, counts, match -> coordinates
+  services/documentStore.js  session cache, TTL, eviction, temp files
+  services/annotate.js       burns marks into a PDF copy as /Ink annotations
+  services/exportTargets.js  folder browsing + writing, path confinement
+  utils/normalize.js         NFKC with an index map
+  utils/regex.js             escaping + query compilation
+  data/categories.js         the two dictionaries
 client/src/
-  App.vue                   layout, upload, per-term search state
-  components/PdfViewer.vue  canvas rendering, zoom, highlight overlay
-  components/SearchPanel.vue category radios, term rows, count badges
+  App.vue                    layout, upload, per-term search state, save flow
+  api.js                     every call to the backend, save-dialog helpers
+  styles.css                 the light / dark token palettes
+  components/PdfViewer.vue   canvas rendering, zoom, pan, markup tools, highlights
+  components/SearchPanel.vue category radios, term rows, count badges, ticks
+  components/SaveDialog.vue  folder picker used when the browser has no native one
+  components/ThemeToggle.vue dark / light switch
+scripts/dev.mjs              runs both dev servers, no dependencies
 ```

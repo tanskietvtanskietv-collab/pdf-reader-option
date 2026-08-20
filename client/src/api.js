@@ -71,6 +71,97 @@ export function searchBatch(docId, category, queries, options = {}) {
   }).then(asJson);
 }
 
+/**
+ * Ask the server for a copy of the PDF with the marks burned in.
+ * @returns {Promise<Blob>} the annotated PDF
+ */
+export async function exportAnnotatedPdf(docId, marks) {
+  const response = await fetch(`${BASE}/pdf/${docId}/export`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ marks }),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.error || `Export failed (${response.status})`);
+  }
+  return response.blob();
+}
+
+/** Sub-folders of `path` on the server machine, for the save dialog. */
+export function listFolders(path = '.') {
+  return fetch(`${BASE}/folders?path=${encodeURIComponent(path)}`).then(asJson);
+}
+
+export function foldersEnabled() {
+  return fetch(`${BASE}/folders/enabled`).then(asJson);
+}
+
+/**
+ * Write the annotated PDF straight into a folder on the server machine.
+ * @throws an Error with `.code === 'EEXIST_PDF'` when the file is already there
+ */
+export async function saveAnnotatedPdfTo(docId, marks, { destination, fileName, overwrite = false }) {
+  const response = await fetch(`${BASE}/pdf/${docId}/export`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ marks, destination, fileName, overwrite }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload.error || `Save failed (${response.status})`);
+    if (response.status === 409) error.code = 'EEXIST_PDF';
+    throw error;
+  }
+  return payload;
+}
+
+/** True when the browser can offer a real "Save As" folder picker. */
+export function canPickSaveLocation() {
+  // Needs a secure context: https, or http on localhost. Plain http on a LAN
+  // address does not qualify, and the API is simply absent there.
+  return typeof window !== 'undefined' && typeof window.showSaveFilePicker === 'function';
+}
+
+/**
+ * Open the save dialog. Must be called directly from the click handler, before
+ * any awaits — the picker requires the transient user activation of that click,
+ * and a network round trip first would consume it.
+ * @returns {Promise<FileSystemFileHandle|null>} null when unsupported or cancelled
+ */
+export async function pickSaveLocation(suggestedName) {
+  if (!canPickSaveLocation()) return null;
+  try {
+    return await window.showSaveFilePicker({
+      suggestedName,
+      types: [{ description: 'PDF document', accept: { 'application/pdf': ['.pdf'] } }],
+    });
+  } catch (error) {
+    if (error?.name === 'AbortError') throw error; // the user cancelled: not a failure
+    return null; // anything else: fall back to a plain download
+  }
+}
+
+/** Write to the chosen file, or fall back to a normal browser download. */
+export async function writePdf(blob, handle, fileName) {
+  if (handle) {
+    const writable = await handle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+    return handle.name;
+  }
+
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  return fileName;
+}
+
 export function releaseDocument(docId) {
   return fetch(`${BASE}/pdf/${docId}`, { method: 'DELETE' }).then(asJson);
 }

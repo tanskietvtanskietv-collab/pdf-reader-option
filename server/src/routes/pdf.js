@@ -1,7 +1,10 @@
 import { Router } from 'express';
 import multer from 'multer';
+import fs from 'node:fs/promises';
 import { parsePdf, pageSummary } from '../services/pdfParser.js';
 import { searchDocument, searchDocumentBatch } from '../services/search.js';
+import { burnAnnotations, validateMarks } from '../services/annotate.js';
+import { writeToFolder } from '../services/exportTargets.js';
 import {
   createDocument,
   getDocument,
@@ -128,6 +131,46 @@ router.get('/:docId/page/:pageNumber', (req, res, next) => {
     if (req.query.include === 'text') payload.text = pageIndex.text;
 
     res.json(payload);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Save As: a copy of the document with the client's marks burned in as real PDF
+ * ink annotations. The cached original is never modified, so searches and
+ * further exports keep working off the untouched file.
+ *
+ * Two ways to receive it:
+ *   - no `destination` — the PDF is streamed back and the browser saves it
+ *     (used when `showSaveFilePicker` gave us a file handle);
+ *   - with `destination` — the server writes it into that folder and replies
+ *     with JSON, which is the only route to a folder choice when the page is
+ *     not in a secure context.
+ */
+router.post('/:docId/export', async (req, res, next) => {
+  try {
+    const record = requireDocument(req);
+    const marks = validateMarks(req.body?.marks, record.totalPages);
+    const original = await fs.readFile(record.filePath);
+    const annotated = await burnAnnotations(original, marks);
+
+    const base = record.fileName.replace(/\.pdf$/i, '');
+    const suggested = `${base}-marked.pdf`;
+    const destination = req.body?.destination;
+
+    if (typeof destination === 'string') {
+      const saved = await writeToFolder(destination, req.body?.fileName || suggested, Buffer.from(annotated), {
+        overwrite: req.body?.overwrite === true,
+      });
+      res.json({ saved: true, ...saved });
+      return;
+    }
+
+    res.type('application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(suggested)}"`);
+    res.setHeader('X-Suggested-Filename', encodeURIComponent(suggested));
+    res.send(Buffer.from(annotated));
   } catch (error) {
     next(error);
   }

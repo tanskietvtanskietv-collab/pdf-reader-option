@@ -4,6 +4,21 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PDF Term Reader — Wakugumi / Jikugumi</title>
+    <script>
+      // Runs before the first paint so the app never flashes the wrong theme.
+      // Same storage key as ThemeToggle.vue; no stored choice means follow the OS.
+      (function () {
+        try {
+          var stored = localStorage.getItem('pdf-term-reader:theme');
+          var dark =
+            stored === 'dark' ||
+            (!stored && window.matchMedia('(prefers-color-scheme: dark)').matches);
+          document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+        } catch (e) {
+          document.documentElement.dataset.theme = 'light';
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>

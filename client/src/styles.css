@@ -1,16 +1,74 @@
-:root {
+/**
+ * Two themes, one token set. `data-theme` on <html> selects the palette and is
+ * set before first paint by the inline script in index.html, so the app never
+ * flashes the wrong colours. Components must only ever reference the tokens.
+ */
+
+:root,
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --surface-0: #eef1f6;
+  --surface-1: #ffffff;
+  --surface-2: #f4f6fa;
+  --surface-3: #e4e9f0;
+  --border: #d2dae4;
+
+  --text: #18212e;
+  --text-muted: #56637a;
+  --text-faint: #66707f;
+
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-soft: #dbe7ff;
+
+  --success: #15803d;
+  --success-bg: #bbf7d0;
+  --success-text: #06301a;
+  --danger: #c0392f;
+  --danger-strong: #d24141;
+  --warning: #d08700;
+
+  --button-hover: #d7dee7;
+  --scrollbar: #c2cbd8;
+  --scrollbar-hover: #aab5c4;
+  --viewer-bg: #dde3ec;
+  --page-shadow: 0 1px 6px rgb(15 23 42 / 18%);
+  --dialog-shadow: 0 24px 60px rgb(15 23 42 / 28%);
+  --overlay: rgb(30 41 59 / 45%);
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
   --surface-0: #0d1015;
   --surface-1: #161b22;
   --surface-2: #1d232c;
   --surface-3: #29313c;
   --border: #2c333d;
+
   --text: #e6eaf0;
   --text-muted: #9aa4b2;
-  --text-faint: #6b7683;
+  --text-faint: #828d99;
+
   --accent: #4c8dff;
+  --accent-hover: #3f7ce8;
   --accent-soft: #1e2f4d;
 
-  color-scheme: dark;
+  --success: #46d18a;
+  --success-bg: #6ee7a0;
+  --success-text: #0b2e13;
+  --danger: #f08a8a;
+  --danger-strong: #d24141;
+  --warning: #f0b429;
+
+  --button-hover: #333c49;
+  --scrollbar: #39424e;
+  --scrollbar-hover: #4a5462;
+  --viewer-bg: #1d232c;
+  --page-shadow: 0 2px 12px rgb(0 0 0 / 35%);
+  --dialog-shadow: 0 24px 60px rgb(0 0 0 / 45%);
+  --overlay: rgb(6 8 12 / 66%);
 }
 
 * {
@@ -47,7 +105,7 @@ button {
 }
 
 button:hover:not(:disabled) {
-  background: #333c49;
+  background: var(--button-hover);
 }
 
 button:disabled {
@@ -63,7 +121,7 @@ button.primary {
 }
 
 button.primary:hover:not(:disabled) {
-  background: #3f7ce8;
+  background: var(--accent-hover);
 }
 
 button.ghost {
@@ -108,13 +166,13 @@ fieldset {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #39424e;
+  background: var(--scrollbar);
   border-radius: 8px;
   border: 3px solid transparent;
   background-clip: content-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #4a5462;
+  background: var(--scrollbar-hover);
   background-clip: content-box;
 }

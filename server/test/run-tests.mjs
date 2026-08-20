@@ -362,3 +362,152 @@ test('expired documents are swept', async () => {
   assert.equal(store.getDocument(record.docId), null);
   await store.shutdown();
 });
+
+/* --------------------------------------------------------- annotation export */
+
+const { validateMarks } = await import('../src/services/annotate.js');
+
+test('mark validation rejects payloads that would corrupt the export', () => {
+  assert.throws(() => validateMarks([], 3), /non-empty/);
+  assert.throws(() => validateMarks(null, 3), /non-empty/);
+  assert.throws(() => validateMarks([{ page: 4, points: [{ x: 1, y: 1 }] }], 3), /between 1 and 3/);
+  assert.throws(() => validateMarks([{ page: 1, points: [] }], 3), /points/);
+  assert.throws(
+    () => validateMarks([{ page: 1, points: [{ x: 1, y: Number.NaN }] }], 3),
+    /finite/,
+  );
+});
+
+test('mark validation clamps the stroke width and defaults it', () => {
+  const [wide, missing] = validateMarks(
+    [
+      { page: 1, width: 5000, points: [{ x: 1, y: 2 }] },
+      { page: 1, points: [{ x: 1, y: 2 }] },
+    ],
+    1,
+  );
+  assert.equal(wide.width, 72);
+  assert.equal(missing.width, 2);
+});
+
+integration('export burns marks in as real PDF ink annotations', async () => {
+  const { burnAnnotations } = await import('../src/services/annotate.js');
+  const original = buildFixturePdf();
+
+  // Viewport space: y grows downward, so y=60 is near the TOP of the page.
+  const marks = validateMarks(
+    [
+      { page: 1, width: 3, points: [{ x: 100, y: 60 }, { x: 160, y: 120 }, { x: 220, y: 60 }] },
+      { page: 1, width: 5, points: [{ x: 400, y: 800 }] },
+    ],
+    1,
+  );
+
+  const annotated = await burnAnnotations(original, marks);
+  assert.ok(annotated.length > original.length, 'the export should add bytes');
+  assert.equal(Buffer.from(annotated.subarray(0, 5)).toString(), '%PDF-');
+
+  const { openDocument } = await import('../src/services/pdfParser.js');
+  const { doc } = await openDocument(annotated);
+  try {
+    const page = await doc.getPage(1);
+    const annots = await page.getAnnotations();
+    assert.equal(annots.length, 2);
+    for (const annot of annots) {
+      assert.equal(annot.subtype, 'Ink');
+      assert.deepEqual(Array.from(annot.color), [232, 38, 43]);
+    }
+    assert.equal(annots[0].borderStyle.width, 3);
+    assert.equal(annots[1].borderStyle.width, 5);
+
+    // Top-left viewport y must become bottom-left user space y: the first mark
+    // spans y 60..120 on an 842pt page, so it lands at ~722..782 plus padding.
+    const [x0, y0, x1, y1] = annots[0].rect;
+    assert.ok(y0 > 700 && y1 < 800, `mark drifted vertically: ${y0}..${y1}`);
+    assert.ok(x0 > 90 && x1 < 230, `mark drifted horizontally: ${x0}..${x1}`);
+    // The single-point mark keeps a non-degenerate box.
+    assert.ok(annots[1].rect[2] - annots[1].rect[0] >= 10);
+  } finally {
+    await doc.destroy();
+  }
+});
+
+integration('the exported file is still searchable', async () => {
+  const { burnAnnotations } = await import('../src/services/annotate.js');
+  const marks = validateMarks([{ page: 1, width: 2, points: [{ x: 50, y: 50 }] }], 1);
+  const annotated = await burnAnnotations(buildFixturePdf(), marks);
+
+  const reparsed = await parsePdf(annotated);
+  const record2 = { docId: 'x', pages: reparsed.pages, totalPages: reparsed.totalPages };
+  assert.equal(searchDocument(record2, 'SA').totalMatches, 3);
+  assert.equal(searchDocument(record2, 'ｽﾃﾝﾊﾟｲﾌﾟ').totalMatches, 1);
+});
+
+/* --------------------------------------------------- save-to-folder targets */
+
+const targets = await import('../src/services/exportTargets.js');
+const path = (await import('node:path')).default;
+const os = (await import('node:os')).default;
+
+test('browsing is unrestricted unless EXPORT_ROOT is set', () => {
+  delete process.env.EXPORT_ROOT;
+  assert.equal(targets.exportRoot(), null);
+  // No root: the top level is the drive list, and absolute paths are allowed.
+  assert.equal(targets.resolveFolder(''), null);
+  assert.equal(targets.resolveFolder('C:\u005CUsers'), path.resolve('C:\u005CUsers'));
+});
+
+test('EXPORT_ENABLED=false blocks the server-side save', () => {
+  delete process.env.EXPORT_ROOT;
+  process.env.EXPORT_ENABLED = 'false';
+  assert.throws(() => targets.resolveFolder(''), /disabled/);
+  delete process.env.EXPORT_ENABLED;
+  assert.doesNotThrow(() => targets.resolveFolder(''));
+});
+
+test('destination folders cannot escape EXPORT_ROOT when it is set', () => {
+  process.env.EXPORT_ROOT = path.join(os.tmpdir(), 'pdf-export-root');
+  const root = targets.exportRoot();
+  assert.equal(targets.resolveFolder('.'), root);
+  assert.equal(targets.resolveFolder(''), root);
+  assert.ok(targets.resolveFolder('Documents').startsWith(root));
+  assert.ok(targets.resolveFolder('Documents/Plans/2024').startsWith(root));
+
+  // \u005C is a backslash: written this way so the escapes survive editing.
+  const BS = '\u005C';
+  for (const escape of [
+    '..',
+    '../..',
+    '../../Windows/System32',
+    `..${BS}..${BS}Windows`,
+    'Documents/../../..',
+    '/etc/passwd',
+    `${BS}etc`,
+    `C:${BS}Windows`,
+    'C:Windows', // drive-relative: resolves against the cwd, not the root
+    'c:/Windows',
+    `D:${BS}elsewhere`,
+    `${BS}${BS}server${BS}share`, // UNC
+  ]) {
+    assert.throws(
+      () => targets.resolveFolder(escape),
+      /stay inside/,
+      `${escape} should have been refused`,
+    );
+  }
+});
+
+test('export file names are stripped of paths and forced to .pdf', () => {
+  delete process.env.EXPORT_ROOT;
+  assert.equal(targets.safeFileName('plan 2024.pdf'), 'plan 2024.pdf');
+  assert.equal(targets.safeFileName('plan2024'), 'plan2024.pdf');
+  assert.equal(targets.safeFileName('../../etc/passwd'), 'passwd.pdf');
+  assert.equal(targets.safeFileName('a<b>c:d"e|f?g*h.pdf'), 'abcdefgh.pdf');
+  // Digits, spaces and Japanese must survive — an over-eager character range
+  // here silently mangles every file name.
+  assert.equal(targets.safeFileName('図面-01.pdf'), '図面-01.pdf');
+  assert.equal(targets.safeFileName('報告書'), '報告書.pdf');
+  assert.equal(targets.safeFileName('   '), 'document-marked.pdf');
+  assert.equal(targets.safeFileName('...'), 'document-marked.pdf');
+  assert.equal(targets.safeFileName(null), 'document-marked.pdf');
+});
