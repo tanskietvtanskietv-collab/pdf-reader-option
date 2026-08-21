@@ -21,6 +21,7 @@ const props = defineProps({
 const emit = defineEmits(['error', 'loaded', 'marks']);
 
 const viewportEl = ref(null);
+const textareaEl = ref(null);
 const pageEls = ref([]);
 const canvasEls = ref([]);
 
@@ -97,12 +98,14 @@ const panning = ref(false);
 const ANNOTATION_COLOR = '#e8262b';
 const STAMP_SIZE = 22; // PDF points, the check mark's bounding box
 
-// 'pan' | 'select' | 'pencil' | 'check' | 'rect' | 'circle'
+// 'pan' | 'select' | 'pencil' | 'check' | 'line' | 'arrow' | 'rect' | 'circle'
+// | 'text' | 'callout'
 const tool = ref('pan');
-const strokeWidth = ref(2); // PDF points
+const strokeWidth = ref(3); // PDF points — see the scale on the toolbar select
 const annotations = ref([]); // committed marks
 const stroke = ref(null); // the in-progress pencil stroke or shape
 const selectedId = ref(null);
+const editingId = ref(null); // the text mark currently open for typing
 
 /**
  * Undo history as whole-array snapshots rather than an add/remove log, because
@@ -134,7 +137,10 @@ let strokeOrigin = null;
 let annotationId = 0;
 
 const annotating = computed(() => tool.value !== 'pan' && tool.value !== 'select');
-const drawingShape = computed(() => tool.value === 'rect' || tool.value === 'circle');
+// Tools drawn by dragging out two corners (or two endpoints).
+const drawingShape = computed(() =>
+  ['rect', 'circle', 'line', 'arrow', 'text', 'callout'].includes(tool.value),
+);
 
 const selectedMark = computed(
   () => annotations.value.find((mark) => mark.id === selectedId.value) ?? null,
@@ -153,12 +159,21 @@ const cursorStyle = computed(() =>
 const handleSize = computed(() => HANDLE_PX / scale.value);
 const hairline = computed(() => 1 / scale.value);
 
-/** The 8 resize handles of a shape, in PDF points. */
+/** Resize handles in PDF points: 8 around a box, 2 on the ends of a line. */
 function handlesFor(mark) {
+  if (isLine(mark)) {
+    const [start, end] = lineEnds(mark);
+    return [
+      { id: 'start', ...start },
+      { id: 'end', ...end },
+    ];
+  }
   const { x, y, w, h } = normalizedBox(mark);
   const mx = x + w / 2;
   const my = y + h / 2;
+  const tail = mark.type === 'callout' ? [{ id: 'tail', x: mark.tail.x, y: mark.tail.y }] : [];
   return [
+    ...tail,
     { id: 'nw', x, y },
     { id: 'n', x: mx, y },
     { id: 'ne', x: x + w, y },
@@ -180,9 +195,175 @@ function normalizedBox({ x, y, w, h }) {
   };
 }
 
-/** Box-shaped marks: everything the select tool can move, resize and delete. */
+/**
+ * Lines and arrows are stored like shapes — origin plus a delta — but the delta
+ * is the second endpoint, not a size, so it is never normalised: flipping it
+ * would reverse the arrowhead.
+ */
+function isLine(mark) {
+  return mark?.type === 'line' || mark?.type === 'arrow';
+}
+
+function isBox(mark) {
+  return (
+    mark?.type === 'rect' ||
+    mark?.type === 'circle' ||
+    mark?.type === 'image' ||
+    isText(mark)
+  );
+}
+
+/* ------------------------------------------------------------ text marks --
+ * Text boxes and callouts. The typed string, the font size and the *wrapped
+ * lines* are all stored on the mark; the SVG renders those lines as tspans and
+ * the export paints the identical lines onto a canvas. Measuring once and
+ * reusing the result is what keeps the screen and the PDF in agreement.
+ *
+ * They are exported as raster stamps rather than PDF FreeText annotations
+ * because pdf.js writes FreeText with Helvetica/WinAnsi, which cannot encode
+ * Japanese — the text is silently dropped from the file. Rasterising costs
+ * selectable text in the export but keeps every glyph the user actually typed.
+ */
+
+const TEXT_FONT = "'Noto Sans JP', 'Meiryo', 'Hiragino Kaku Gothic ProN', system-ui, sans-serif";
+const TEXT_SIZE = 11; // PDF points
+const TEXT_PAD = 4; // inner padding, PDF points
+const TEXT_LINE = 1.35; // line height multiplier
+const CALLOUT_MIN = 24;
+
+function isText(mark) {
+  return mark?.type === 'text' || mark?.type === 'callout';
+}
+
+let measureContext = null;
+function measure(text, fontSize) {
+  if (!measureContext) measureContext = document.createElement('canvas').getContext('2d');
+  measureContext.font = `${fontSize}px ${TEXT_FONT}`;
+  return measureContext.measureText(text).width;
+}
+
+/**
+ * Wrap into lines that fit `maxWidth`. Falls back to breaking mid-word, which
+ * matters for Japanese: it has no spaces, so a whole sentence is one "word".
+ */
+function wrapText(text, fontSize, maxWidth) {
+  const limit = Math.max(maxWidth, fontSize);
+  const lines = [];
+
+  for (const paragraph of String(text ?? '').split('\n')) {
+    if (!paragraph) {
+      lines.push('');
+      continue;
+    }
+    let line = '';
+    for (const char of paragraph) {
+      const candidate = line + char;
+      if (line && measure(candidate, fontSize) > limit) {
+        // Break at the last space when there is one, so Latin text does not get
+        // chopped mid-word; Japanese has no spaces, so it falls back to the
+        // glyph boundary, which is how Japanese wraps anyway.
+        const boundary = line.lastIndexOf(' ');
+        if (boundary > 0) {
+          lines.push(line.slice(0, boundary));
+          line = line.slice(boundary + 1) + char;
+        } else {
+          lines.push(line);
+          line = char;
+        }
+      } else {
+        line = candidate;
+      }
+    }
+    lines.push(line);
+  }
+  return lines;
+}
+
+/** Re-wrap a mark after its text or width changed. */
+function withLines(mark) {
+  const lines = wrapText(mark.text, mark.fontSize, mark.w - TEXT_PAD * 2);
+  const needed = lines.length * mark.fontSize * TEXT_LINE + TEXT_PAD * 2;
+  return { ...mark, lines, h: round2(Math.max(mark.h, needed)) };
+}
+
+/** The leader as a path, shared by the SVG on screen and the /Ink export. */
+function calloutPath(mark) {
+  const anchor = calloutAnchor(mark);
+  return inkPath(
+    arrowPoints({
+      x: anchor.x,
+      y: anchor.y,
+      w: mark.tail.x - anchor.x,
+      h: mark.tail.y - anchor.y,
+      width: mark.width,
+    }),
+  );
+}
+
+/** Where the leader line leaves the box: the edge nearest the tail. */
+function calloutAnchor(mark) {
+  const { x, y, w, h } = normalizedBox(mark);
+  const cx = x + w / 2;
+  const cy = y + h / 2;
+  const dx = mark.tail.x - cx;
+  const dy = mark.tail.y - cy;
+  if (Math.abs(dx) * h > Math.abs(dy) * w) {
+    return { x: dx > 0 ? x + w : x, y: round2(cy) };
+  }
+  return { x: round2(cx), y: dy > 0 ? y + h : y };
+}
+
+/** Everything the select tool can move, resize and delete. */
 function isShape(mark) {
-  return mark?.type === 'rect' || mark?.type === 'circle' || mark?.type === 'image';
+  return isBox(mark) || isLine(mark);
+}
+
+function lineEnds(mark) {
+  return [
+    { x: mark.x, y: mark.y },
+    { x: mark.x + mark.w, y: mark.y + mark.h },
+  ];
+}
+
+/**
+ * Arrow as a single polyline: shaft, then out to one barb, back to the tip, out
+ * to the other. Retracing the tip keeps it one stroke, which is what the /Ink
+ * export wants, and screen and PDF then read from the identical point list.
+ */
+function arrowPoints(mark) {
+  const [start, end] = lineEnds(mark);
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const length = Math.hypot(dx, dy);
+  if (!length) return [start, end];
+
+  const head = Math.min(Math.max(mark.width * 4, 6), 18);
+  const angle = Math.atan2(dy, dx);
+  const spread = 0.42; // ~24 degrees each side
+  const barb = (sign) => ({
+    x: round2(end.x - head * Math.cos(angle + sign * spread)),
+    y: round2(end.y - head * Math.sin(angle + sign * spread)),
+  });
+
+  return [start, end, barb(1), end, barb(-1)];
+}
+
+function linePath(mark) {
+  return inkPath(mark.type === 'arrow' ? arrowPoints(mark) : lineEnds(mark));
+}
+
+/** Perpendicular distance from a point to a segment, for hit-testing lines. */
+function distanceToSegment(point, a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const lengthSq = dx * dx + dy * dy;
+  if (!lengthSq) return Math.hypot(point.x - a.x, point.y - a.y);
+
+  const t = Math.min(
+    1,
+    Math.max(0, ((point.x - a.x) * dx + (point.y - a.y) * dy) / lengthSq),
+  );
+  return Math.hypot(point.x - (a.x + t * dx), point.y - (a.y + t * dy));
 }
 
 /* ---------------------------------------------------------- pasted images --
@@ -349,29 +530,94 @@ function ellipsePoints(mark, segments = 64) {
  */
 function markPoints(mark) {
   if (mark.type === 'check') return stampPoints(mark, mark.size);
+  if (mark.type === 'arrow') return arrowPoints(mark);
+  if (mark.type === 'line') return lineEnds(mark);
   if (mark.type === 'rect') return rectPoints(mark);
   if (mark.type === 'circle') return ellipsePoints(mark);
   return mark.points;
 }
 
-function exportMarks() {
-  return annotations.value.map((mark) => {
-    if (mark.type === 'image') {
-      const { x, y, w, h } = normalizedBox(mark);
-      return {
-        page: mark.page,
-        x,
-        y,
-        w,
-        h,
-        image: { data: mark.data, pixelWidth: mark.pixelWidth, pixelHeight: mark.pixelHeight },
-      };
-    }
-    return {
+/**
+ * Paint a text mark onto a canvas and hand back JPEG bytes. Same rect, same
+ * wrapped lines and same font as the SVG draws, so the export matches what is
+ * on screen. Rendered at 3x so it stays sharp when the PDF is zoomed.
+ */
+function rasteriseText(mark) {
+  const scaleUp = 3;
+  const { w, h } = normalizedBox(mark);
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(w * scaleUp));
+  canvas.height = Math.max(1, Math.round(h * scaleUp));
+
+  const ctx = canvas.getContext('2d');
+  ctx.scale(scaleUp, scaleUp);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, w, h);
+  ctx.strokeStyle = ANNOTATION_COLOR;
+  ctx.lineWidth = mark.width;
+  ctx.strokeRect(mark.width / 2, mark.width / 2, w - mark.width, h - mark.width);
+
+  ctx.fillStyle = ANNOTATION_COLOR;
+  ctx.font = `${mark.fontSize}px ${TEXT_FONT}`;
+  ctx.textBaseline = 'alphabetic';
+  mark.lines.forEach((line, i) => {
+    ctx.fillText(line, TEXT_PAD, TEXT_PAD + mark.fontSize * (TEXT_LINE * i + 0.85));
+  });
+
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+  return {
+    data: dataUrl.slice(dataUrl.indexOf(',') + 1),
+    pixelWidth: canvas.width,
+    pixelHeight: canvas.height,
+  };
+}
+
+/** A text box exports as one stamp; a callout adds its leader line as ink. */
+function textExportMarks(mark) {
+  const { x, y, w, h } = normalizedBox(mark);
+  const image = rasteriseText(mark);
+  const marks = [{ page: mark.page, x, y, w, h, image }];
+
+  if (mark.type === 'callout') {
+    const anchor = calloutAnchor(mark);
+    marks.push({
       page: mark.page,
       width: mark.width,
-      points: markPoints(mark).map((p) => ({ x: p.x, y: p.y })),
-    };
+      points: arrowPoints({
+        x: anchor.x,
+        y: anchor.y,
+        w: mark.tail.x - anchor.x,
+        h: mark.tail.y - anchor.y,
+        width: mark.width,
+      }).map((p) => ({ x: p.x, y: p.y })),
+    });
+  }
+  return marks;
+}
+
+function exportMarks() {
+  return annotations.value.flatMap((mark) => {
+    if (isText(mark)) return textExportMarks(mark);
+    if (mark.type === 'image') {
+      const { x, y, w, h } = normalizedBox(mark);
+      return [
+        {
+          page: mark.page,
+          x,
+          y,
+          w,
+          h,
+          image: { data: mark.data, pixelWidth: mark.pixelWidth, pixelHeight: mark.pixelHeight },
+        },
+      ];
+    }
+    return [
+      {
+        page: mark.page,
+        width: mark.width,
+        points: markPoints(mark).map((p) => ({ x: p.x, y: p.y })),
+      },
+    ];
   });
 }
 
@@ -857,7 +1103,10 @@ function startShape(event) {
   selectedId.value = null;
   stroke.value = {
     id: ++annotationId,
-    type: tool.value === 'rect' ? 'rect' : 'circle',
+    type: tool.value,
+    ...(tool.value === 'text' || tool.value === 'callout'
+      ? { text: '', fontSize: TEXT_SIZE, lines: [] }
+      : null),
     page: point.page,
     x: point.x,
     y: point.y,
@@ -884,10 +1133,38 @@ function endShape(event) {
   strokeOrigin = null;
   if (!shape) return;
 
-  // A click without a drag is not a shape.
-  if (Math.abs(shape.w) < MIN_SHAPE || Math.abs(shape.h) < MIN_SHAPE) return;
+  if (isText(shape)) {
+    // A click rather than a drag still gives a usable box.
+    const box = normalizedBox(shape);
+    const w = Math.max(box.w, 140);
+    const h = Math.max(box.h, shape.fontSize * TEXT_LINE + TEXT_PAD * 2);
+    const mark = withLines({
+      ...shape,
+      ...box,
+      w: round2(w),
+      h: round2(h),
+      // The tail starts below-left of the box; drag its handle to aim it.
+      tail:
+        shape.type === 'callout'
+          ? { x: round2(box.x - CALLOUT_MIN), y: round2(box.y + h + CALLOUT_MIN) }
+          : undefined,
+    });
+    addAnnotation(mark);
+    tool.value = 'select';
+    selectedId.value = mark.id;
+    startEditing(mark.id);
+    return;
+  }
 
-  addAnnotation({ ...shape, ...normalizedBox(shape) });
+  if (isLine(shape)) {
+    // A line only needs length; a purely horizontal one has h === 0.
+    if (Math.hypot(shape.w, shape.h) < MIN_SHAPE) return;
+    addAnnotation({ ...shape });
+  } else {
+    // A click without a drag is not a shape.
+    if (Math.abs(shape.w) < MIN_SHAPE || Math.abs(shape.h) < MIN_SHAPE) return;
+    addAnnotation({ ...shape, ...normalizedBox(shape) });
+  }
   // The tool stays active on purpose: picking the circle once should let you
   // draw as many circles as you like. Switch to Select to adjust one.
 }
@@ -902,6 +1179,16 @@ function shapeAt(point) {
   for (let i = annotations.value.length - 1; i >= 0; i--) {
     const mark = annotations.value[i];
     if (!isShape(mark) || mark.page !== point.page) continue;
+
+    if (isLine(mark)) {
+      // The bounding box of a diagonal line is mostly empty space, so grab it
+      // by proximity to the stroke itself.
+      const [start, end] = lineEnds(mark);
+      const reach = Math.max(handleSize.value / 2, mark.width);
+      if (distanceToSegment(point, start, end) <= reach) return mark;
+      continue;
+    }
+
     const { x, y, w, h } = normalizedBox(mark);
     if (
       point.x >= x - slack &&
@@ -945,9 +1232,18 @@ function cursorFor(clientX, clientY) {
   const current = selectedMark.value;
   if (current && current.page === point.page) {
     const handle = handleAt(current, point);
-    if (handle) return HANDLE_CURSOR[handle.id];
+    if (handle) return HANDLE_CURSOR[handle.id] ?? directionCursor(current);
   }
   return shapeAt(point) ? 'move' : 'default';
+}
+
+/** Endpoint handles have no fixed axis, so read one off the line itself. */
+function directionCursor(mark) {
+  const dx = Math.abs(mark.w);
+  const dy = Math.abs(mark.h);
+  if (dx > dy * 2) return 'ew-resize';
+  if (dy > dx * 2) return 'ns-resize';
+  return mark.w * mark.h < 0 ? 'nesw-resize' : 'nwse-resize';
 }
 
 function clearHoverCursor() {
@@ -976,7 +1272,7 @@ function beginSelection(event) {
       pointerId: event.pointerId,
       index: point.index,
       origin: point,
-      start: normalizedBox(current),
+      start: isLine(current) || isText(current) ? { ...current } : normalizedBox(current),
       snapshot: annotations.value,
     };
     return;
@@ -994,7 +1290,7 @@ function beginSelection(event) {
     pointerId: event.pointerId,
     index: point.index,
     origin: point,
-    start: normalizedBox(hit),
+    start: isLine(hit) || isText(hit) ? { ...hit } : normalizedBox(hit),
     snapshot: annotations.value,
   };
 }
@@ -1015,6 +1311,24 @@ function dragMove(event) {
 
   if (drag.mode === 'move') {
     updateMark(selectedId.value, { x: round2(x + dx), y: round2(y + dy) });
+    return;
+  }
+
+  // A line has no edges to push, only two ends. Moving the start has to shift
+  // the delta the other way so the far end stays where it is.
+  if (drag.handle === 'tail') {
+    updateMark(selectedId.value, {
+      tail: { x: round2(drag.start.tail.x + dx), y: round2(drag.start.tail.y + dy) },
+    });
+    return;
+  }
+
+  if (drag.handle === 'start' || drag.handle === 'end') {
+    const patch =
+      drag.handle === 'start'
+        ? { x: round2(x + dx), y: round2(y + dy), w: round2(w - dx), h: round2(h - dy) }
+        : { w: round2(w + dx), h: round2(h + dy) };
+    updateMark(selectedId.value, patch);
     return;
   }
 
@@ -1050,7 +1364,10 @@ function dragEnd(event) {
   if (view?.hasPointerCapture?.(event.pointerId)) view.releasePointerCapture(event.pointerId);
 
   const mark = selectedMark.value;
-  if (mark) {
+  if (mark && isLine(mark)) {
+    if (Math.hypot(mark.w, mark.h) < MIN_SHAPE) annotations.value = drag.snapshot;
+    else pushHistory(drag.snapshot);
+  } else if (mark) {
     // A resize dragged past the opposite edge leaves negative width/height.
     const box = normalizedBox(mark);
     if (box.w < MIN_SHAPE || box.h < MIN_SHAPE) {
@@ -1063,6 +1380,81 @@ function dragEnd(event) {
   }
   drag = null;
   hoverCursor.value = cursorFor(event.clientX, event.clientY);
+}
+
+/* ------------------------------------------------------- text editing --- */
+
+const editingMark = computed(
+  () => annotations.value.find((mark) => mark.id === editingId.value) ?? null,
+);
+
+/** Screen box of the mark being edited, so the textarea can sit exactly on it. */
+const editorBox = computed(() => {
+  const mark = editingMark.value;
+  const el = mark ? pageEls.value[mark.page - 1] : null;
+  const view = viewportEl.value;
+  if (!mark || !el || !view) return null;
+
+  const page = el.getBoundingClientRect();
+  const bounds = view.getBoundingClientRect();
+  const { x, y, w, h } = normalizedBox(mark);
+  return {
+    left: page.left - bounds.left + x * scale.value,
+    top: page.top - bounds.top + y * scale.value,
+    width: w * scale.value,
+    height: h * scale.value,
+    fontSize: mark.fontSize * scale.value,
+    padding: TEXT_PAD * scale.value,
+  };
+});
+
+const editorStyle = computed(() => {
+  const box = editorBox.value;
+  if (!box) return null;
+  return {
+    left: `${box.left}px`,
+    top: `${box.top}px`,
+    width: `${box.width}px`,
+    height: `${box.height}px`,
+    fontSize: `${box.fontSize}px`,
+    padding: `${box.padding}px`,
+    lineHeight: TEXT_LINE,
+  };
+});
+
+/** Double clicking a text box or callout reopens it for typing. */
+function onDoubleClick(event) {
+  if (tool.value !== 'select') return;
+  const point = pdfPointAt(event.clientX, event.clientY);
+  const hit = point ? shapeAt(point) : null;
+  if (!isText(hit)) return;
+  event.preventDefault();
+  selectedId.value = hit.id;
+  startEditing(hit.id);
+}
+
+function startEditing(id) {
+  editingId.value = id;
+  nextTick(() => textareaEl.value?.focus());
+}
+
+/** Re-wrap on every keystroke so the box grows as you type. */
+function onEditInput(event) {
+  const mark = editingMark.value;
+  if (!mark) return;
+  const next = withLines({ ...mark, text: event.target.value });
+  updateMark(mark.id, { text: next.text, lines: next.lines, h: next.h });
+}
+
+function stopEditing() {
+  const mark = editingMark.value;
+  editingId.value = null;
+  // An empty box is not worth keeping; drop it and the history entry with it.
+  if (mark && !mark.text.trim()) {
+    annotations.value = annotations.value.filter((entry) => entry.id !== mark.id);
+    past.value = past.value.slice(0, -1);
+    if (selectedId.value === mark.id) selectedId.value = null;
+  }
 }
 
 function deleteSelected() {
@@ -1382,17 +1774,37 @@ defineExpose({ goToPage, scrollToHighlight, zoomIn, zoomOut, fitWidth, exportMar
         </button>
         <button
           type="button"
-          class="ghost"
+          class="ghost mark-tool"
           :class="{ active: tool === 'pencil' }"
           @click="tool = 'pencil'"
           :disabled="!docId"
           title="Pencil — draw in red (Esc returns to the hand)"
         >
-          ✏️
+          ✎
         </button>
         <button
           type="button"
-          class="ghost"
+          class="ghost mark-tool"
+          :class="{ active: tool === 'line' }"
+          @click="tool = 'line'"
+          :disabled="!docId"
+          title="Line — drag to draw a straight red line"
+        >
+          ╱
+        </button>
+        <button
+          type="button"
+          class="ghost mark-tool"
+          :class="{ active: tool === 'arrow' }"
+          @click="tool = 'arrow'"
+          :disabled="!docId"
+          title="Arrow — drag from the tail to the head"
+        >
+          ↗
+        </button>
+        <button
+          type="button"
+          class="ghost mark-tool"
           :class="{ active: tool === 'rect' }"
           @click="tool = 'rect'"
           :disabled="!docId"
@@ -1402,7 +1814,7 @@ defineExpose({ goToPage, scrollToHighlight, zoomIn, zoomOut, fitWidth, exportMar
         </button>
         <button
           type="button"
-          class="ghost"
+          class="ghost mark-tool"
           :class="{ active: tool === 'circle' }"
           @click="tool = 'circle'"
           :disabled="!docId"
@@ -1412,7 +1824,27 @@ defineExpose({ goToPage, scrollToHighlight, zoomIn, zoomOut, fitWidth, exportMar
         </button>
         <button
           type="button"
-          class="ghost"
+          class="ghost mark-tool"
+          :class="{ active: tool === 'text' }"
+          @click="tool = 'text'"
+          :disabled="!docId"
+          title="Text box — drag a box, then type. Double click one to edit it again."
+        >
+          T
+        </button>
+        <button
+          type="button"
+          class="ghost mark-tool"
+          :class="{ active: tool === 'callout' }"
+          @click="tool = 'callout'"
+          :disabled="!docId"
+          title="Callout — a text box with a leader; drag its tip to aim it"
+        >
+          ⌇T
+        </button>
+        <button
+          type="button"
+          class="ghost mark-tool"
           :class="{ active: tool === 'check' }"
           @click="tool = 'check'"
           :disabled="!docId"
@@ -1427,10 +1859,12 @@ defineExpose({ goToPage, scrollToHighlight, zoomIn, zoomOut, fitWidth, exportMar
           :disabled="!docId"
           title="Line thickness"
         >
-          <option :value="1">Thin</option>
-          <option :value="2">Medium</option>
-          <option :value="4">Thick</option>
-          <option :value="7">Extra</option>
+          <!-- PDF points. Nudged up from 1/2/4/7 so marks read clearly against
+               dense CAD linework without becoming blobs. -->
+          <option :value="1.5">Thin</option>
+          <option :value="3">Medium</option>
+          <option :value="5">Thick</option>
+          <option :value="8">Extra</option>
         </select>
 
         <button
@@ -1496,6 +1930,7 @@ defineExpose({ goToPage, scrollToHighlight, zoomIn, zoomOut, fitWidth, exportMar
       @pointerup="onPointerUp"
       @pointercancel="onPointerUp"
       @pointerleave="clearHoverCursor"
+      @dblclick="onDoubleClick"
     >
       <p v-if="!docId && !busyOverlay" class="placeholder">
         Upload a PDF drawing to start. The server extracts the text layer and returns bounding
@@ -1546,6 +1981,49 @@ defineExpose({ goToPage, scrollToHighlight, zoomIn, zoomOut, fitWidth, exportMar
               :height="normalizedBox(mark).h"
               preserveAspectRatio="none"
             />
+            <g v-else-if="mark.type === 'text' || mark.type === 'callout'">
+              <!-- Leader first so the box paints over its blunt end. -->
+              <path
+                v-if="mark.type === 'callout'"
+                :d="calloutPath(mark)"
+                fill="none"
+                :stroke="ANNOTATION_COLOR"
+                :stroke-width="mark.width"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <rect
+                :x="normalizedBox(mark).x"
+                :y="normalizedBox(mark).y"
+                :width="normalizedBox(mark).w"
+                :height="normalizedBox(mark).h"
+                fill="#ffffff"
+                :stroke="ANNOTATION_COLOR"
+                :stroke-width="mark.width"
+              />
+              <text
+                v-if="mark.id !== editingId"
+                :fill="ANNOTATION_COLOR"
+                :font-size="mark.fontSize"
+                :font-family="TEXT_FONT"
+              >
+                <tspan
+                  v-for="(line, i) in mark.lines"
+                  :key="i"
+                  :x="normalizedBox(mark).x + 4"
+                  :y="normalizedBox(mark).y + 4 + mark.fontSize * (1.35 * i + 0.85)"
+                >{{ line }}</tspan>
+              </text>
+            </g>
+            <path
+              v-else-if="mark.type === 'line' || mark.type === 'arrow'"
+              :d="linePath(mark)"
+              fill="none"
+              :stroke="ANNOTATION_COLOR"
+              :stroke-width="mark.width"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
             <ellipse
               v-else-if="mark.type === 'circle'"
               :cx="normalizedBox(mark).x + normalizedBox(mark).w / 2"
@@ -1571,6 +2049,7 @@ defineExpose({ goToPage, scrollToHighlight, zoomIn, zoomOut, fitWidth, exportMar
                constant pixel size however far the viewer is zoomed. -->
           <g v-if="selectedMark && selectedMark.page === page.page" class="selection">
             <rect
+              v-if="!isLine(selectedMark)"
               :x="normalizedBox(selectedMark).x"
               :y="normalizedBox(selectedMark).y"
               :width="normalizedBox(selectedMark).w"
@@ -1610,6 +2089,20 @@ defineExpose({ goToPage, scrollToHighlight, zoomIn, zoomOut, fitWidth, exportMar
           ></div>
         </div>
       </div>
+
+      <!-- Typing happens in a real textarea laid over the mark, because that is
+           what gives Japanese IME composition somewhere to work. The SVG text
+           is hidden while it is open so the two do not double up. -->
+      <textarea
+        v-if="editorBox"
+        ref="textareaEl"
+        class="text-editor"
+        :value="editingMark.text"
+        :style="editorStyle"
+        @input="onEditInput"
+        @blur="stopEditing"
+        @keydown.esc.prevent="stopEditing"
+      ></textarea>
     </div>
 
       <!-- Progress while the file is on its way in. Anchored over the page area
@@ -1712,6 +2205,22 @@ defineExpose({ goToPage, scrollToHighlight, zoomIn, zoomOut, fitWidth, exportMar
   user-select: none;
 }
 
+
+/* Sits exactly over the mark it edits, so typing looks like typing in place. */
+.text-editor {
+  position: absolute;
+  z-index: 5;
+  margin: 0;
+  border: 1px solid #e8262b;
+  border-radius: 0;
+  background: #ffffff;
+  color: #e8262b;
+  font-family: inherit;
+  resize: none;
+  overflow: hidden;
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
 /* Annotation layer: above the canvas, never intercepting the pointer — the
    scroll container owns all pointer handling. */
 .ink {
@@ -1733,6 +2242,22 @@ defineExpose({ goToPage, scrollToHighlight, zoomIn, zoomOut, fitWidth, exportMar
 
 .tools .ghost.active {
   background: var(--accent-soft);
+}
+
+/* The tools that put red on the page carry it in their icon too. `--tool-red`
+   is the annotation red tuned per theme so the glyphs clear AA contrast on the
+   toolbar; the ink drawn on the (always white) page stays exactly
+   ANNOTATION_COLOR. Hand and Select do not draw, so they stay neutral. */
+.tools .mark-tool {
+  color: var(--tool-red);
+  font-size: 15px;
+  line-height: 1.1;
+}
+
+/* Beats `button.ghost.active`, which would otherwise recolour it accent blue. */
+.tools .mark-tool.active {
+  color: var(--tool-red);
+  border-color: var(--tool-red);
 }
 
 .viewer-body {

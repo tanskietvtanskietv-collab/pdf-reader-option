@@ -24,7 +24,8 @@ client (Vue 3, Vite)                     server (Express, pdf.js)
   full of regex characters like `(H)`, `24-`, `CH=` and `+レ` all just work.
 - Viewer: fixed 100 % start, Ctrl+wheel zoom, hand-tool panning, lazy page
   rendering, a resizable split, and a progress panel while a drawing loads.
-- Markup: red pencil, check stamp, rectangle and circle, with selectable
+- Markup: red pencil, line, arrow, rectangle, circle, text box, callout and
+  check stamp, with selectable
   thickness. Shapes can be selected, moved, resized and deleted; undo/redo
   covers every edit.
 - **Paste a screenshot** with Ctrl+V — Snipping Tool captures included — then
@@ -126,16 +127,24 @@ Options accepted by both search endpoints: `caseInsensitive` (default `true`),
 
 ## Markup and saving
 
-The markup tools — pencil, check stamp, **rectangle** and **circle** — write into
+The markup tools — pencil, **line**, **arrow**, **rectangle**, **circle** and the
+check stamp — write into
 an SVG layer whose `viewBox` is the page box, so every mark is stored in **PDF
 points at scale 1**, the same units search hits use. Marks therefore stay welded
 to the drawing through zoom, pan and a resize, and stroke widths scale with the
 document.
 
+**Text boxes** and **callouts** open for typing as soon as you draw them; double
+click one with the Select tool to edit it again, and drag a callout's tip to aim
+its leader. Both wrap Japanese and Latin text, and grow as you type.
+
 A shape tool stays selected after you finish a shape, so picking **Circle** once
 lets you draw as many circles as you want; the same goes for **Rectangle**.
 
-Switch to the **Select** tool to click a rectangle, circle or pasted image. It
+A line or arrow is grabbed by its stroke and has two endpoint handles rather than
+eight, so you can drag either end.
+
+Switch to the **Select** tool to click a shape, line or pasted image. It
 gets a dashed outline and eight handles, and the pointer tells you what will
 happen: a **move** cursor over the body, and a **double-headed arrow** over each
 handle pointing along the axis it resizes. Drag inside to move it, drag a handle
@@ -246,7 +255,8 @@ click, takes arrow keys when focused, and remembers the width in localStorage.
   plain scroll still scrolls. Toolbar zoom in/out, zoom percentage, 100 %, fit
   width/page, page counter, lazy rendering with a ±3 page window, highlight
   overlay. Pages wider than the pane overflow to the right and stay reachable.
-  **Markup tools**: red pencil, check stamp, rectangle and circle, with a
+  **Markup tools** (their icons are red, matching the ink): pencil, line, arrow,
+  rectangle, circle, text box, callout and check stamp, with a
   thickness selector (thin / medium / thick / extra), a select tool for moving,
   resizing and deleting, plus undo, redo and clear. **Ctrl+V** pastes a
   screenshot from the clipboard onto the page.

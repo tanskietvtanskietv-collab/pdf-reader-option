@@ -225,6 +225,14 @@ orange, and the page placeholder.
   the rule has to be made in both places — key and logic.
 - `--viewer-bg` exists separately from `--surface-2` because white pages need a
   darker ground in light mode or they disappear into the pane.
+- `--tool-red` colours the icons of the six tools that draw (pencil, line,
+  arrow, rect, circle, check); Hand and Select stay neutral because they make no
+  marks. It is the annotation red **tuned per theme** — the literal ink colour
+  only reaches 4.4:1 on white and 3.9:1 on the dark toolbar, so the token is
+  `#d61f24` / `#ff6b70` instead. The ink on the page is still exactly
+  `ANNOTATION_COLOR`. The rule is written `.tools .mark-tool.active` on purpose:
+  plain `.mark-tool` loses to `button.ghost.active`, which would repaint the
+  selected tool accent blue.
 
 ## UI layout and scroll model
 
@@ -238,8 +246,8 @@ below. **The browser window never scrolls** — `html, body, #app` are
   width / fit page remain available from the toolbar. The scroll container uses
   block layout with `margin: 0 auto` per page — flex `align-items: center` clips
   the left edge of a page wider than the pane and makes it unreachable.
-- **Annotations** (`tool` = `pan` | `select` | `pencil` | `check` | `rect` |
-  `circle`). Pencil draws red freehand, the check stamp drops a red tick, and
+- **Annotations** (`tool` = `pan` | `select` | `pencil` | `check` | `line` |
+  `arrow` | `rect` | `circle` | `text` | `callout`). Pencil draws red freehand, the check stamp drops a red tick, and
   rect/circle drag out a red outline; all take the thickness from the toolbar
   `select`. Marks are stored **in PDF points at scale 1** — the same contract as
   search hits — and rendered into a per-page `<svg viewBox="0 0 pageW pageH">`
@@ -252,6 +260,14 @@ below. **The browser window never scrolls** — `html, body, #app` are
   long stroke quadratic.
 - **Shapes** carry `{ x, y, w, h }` rather than points, and `w`/`h` may be
   negative while being dragged; `normalizedBox()` is what every consumer reads.
+- **Lines and arrows** share that storage, but `w`/`h` are the *second endpoint*,
+  not a size, so they are **never normalised** — flipping them would reverse the
+  arrowhead. They get two endpoint handles instead of eight (`handlesFor()`
+  branches on `isLine`), are hit-tested by `distanceToSegment()` rather than by
+  their box (the box of a diagonal line is mostly empty space), and survive the
+  minimum-size check on **length**, since a flat line legitimately has `h === 0`.
+  `arrowPoints()` emits shaft → barb → tip → barb as one retraced polyline, so
+  the screen and the exported `/Ink` annotation read from the same list.
   A shape tool **stays active after a shape is finished**, so one click on the
   circle button lets you draw any number of circles; `select` is a separate tool.
   The 8 resize handles and the selection outline are sized `HANDLE_PX / scale`
@@ -264,6 +280,22 @@ below. **The browser window never scrolls** — `html, body, #app` are
   The hit test walks page rects, so it is throttled to one `requestAnimationFrame`
   and skipped entirely while dragging — a drag pins the cursor it started with,
   otherwise straying a pixel off a handle would flicker it back to `move`.
+- **Text boxes and callouts** store the typed string, the font size *and the
+  wrapped lines*. `wrapText()` measures with a canvas 2d context and breaks at
+  the last space when there is one — Japanese has none, so it falls back to the
+  glyph boundary, which is how Japanese wraps anyway. The SVG renders those
+  stored lines as tspans and the export paints the identical lines onto a
+  canvas, so measuring once is what keeps screen and PDF in agreement.
+  Typing happens in a real `<textarea>` laid over the mark, because that is what
+  gives a Japanese IME somewhere to compose. A callout adds a `tail` point and a
+  ninth handle; `calloutAnchor()` picks the box edge nearest the tail.
+- **Why text is rasterised, not a PDF FreeText annotation.** pdf.js can write
+  FreeText, but only with Helvetica/WinAnsi: probing it showed ASCII survives
+  and **Japanese is silently dropped from the file entirely**. Text marks are
+  therefore exported as raster stamps like pasted images. The cost is that the
+  note is not selectable text in the export; the benefit is that every glyph the
+  user typed actually appears. A callout exports as **two** marks — the stamp
+  plus an `/Ink` leader — which is why `exportMarks()` uses `flatMap`.
 - **Pasted screenshots** (Ctrl+V, window `paste` listener) become
   `type: 'image'` marks. They use the same box model as shapes, so select, move,
   resize and delete come for free — `isShape()` includes them deliberately. The
