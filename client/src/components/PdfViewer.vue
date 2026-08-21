@@ -13,6 +13,10 @@ const props = defineProps({
   // Search hits from the server: [{ page, index, bounds, rects }] at scale 1.
   highlights: { type: Array, default: () => [] },
   activeIndex: { type: Number, default: -1 },
+  // Where the document is in the upload -> parse pipeline, driven by App.vue.
+  phase: { type: String, default: 'idle' },
+  // Upload percentage; only meaningful while phase === 'uploading'.
+  phaseProgress: { type: Number, default: 0 },
 });
 const emit = defineEmits(['error', 'loaded', 'marks']);
 
@@ -22,6 +26,58 @@ const canvasEls = ref([]);
 
 const pdfDoc = shallowRef(null);
 const loading = ref(false);
+// Bytes fetched while pdf.js opens the file, from the loading task's onProgress.
+const fetchProgress = ref(null);
+
+/**
+ * Everything the viewer shows while a document is on its way in. Four stages,
+ * two of which can report a real percentage:
+ *   uploading — bytes going up, measured by XHR in App.vue
+ *   parsing   — the server extracting the text layer; no progress to report
+ *   opening   — pdf.js fetching the cached bytes back, measured by onProgress
+ *   rendering — the first page being painted
+ */
+const busyOverlay = computed(() => {
+  if (props.phase === 'uploading') {
+    return {
+      label: 'Uploading the drawing…',
+      detail: 'Sending the file to the server.',
+      percent: Math.min(Math.max(props.phaseProgress, 0), 100),
+    };
+  }
+  if (props.phase === 'parsing') {
+    return {
+      label: 'Reading the drawing…',
+      detail: 'The server is extracting the text layer and every glyph position.',
+      percent: null,
+    };
+  }
+  if (loading.value) {
+    const { loaded = 0, total = 0 } = fetchProgress.value ?? {};
+    return {
+      label: 'Opening the document…',
+      detail: total ? `${formatBytes(loaded)} of ${formatBytes(total)}` : 'Fetching the file.',
+      percent: total ? Math.min(Math.round((loaded / total) * 100), 100) : null,
+    };
+  }
+  // The document is open but nothing has been painted yet. Keyed on "no page
+  // has rendered at all" rather than "this page has not rendered": the latter
+  // would leave the overlay stuck forever if a single page ever failed.
+  if (props.docId && props.pages.length && renderedPages.value.size === 0) {
+    return {
+      label: `Rendering page ${currentPage.value}…`,
+      detail: 'Large drawings take a moment to paint.',
+      percent: null,
+    };
+  }
+  return null;
+});
+
+function formatBytes(bytes) {
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
+}
 const currentPage = ref(1);
 // The viewer opens at a fixed 100 % and scrolls; fit width / fit page stay
 // available from the toolbar but are never the initial state.
@@ -369,13 +425,19 @@ watch(
     if (!docId) return;
 
     loading.value = true;
+    fetchProgress.value = null;
     try {
-      pdfDoc.value = await pdfjsLib.getDocument({
+      const task = pdfjsLib.getDocument({
         url: documentFileUrl(docId),
         cMapUrl: '/pdfjs/cmaps/',
         cMapPacked: true,
         standardFontDataUrl: '/pdfjs/standard_fonts/',
-      }).promise;
+      });
+      // `total` is only present when the response carries a Content-Length.
+      task.onProgress = ({ loaded, total }) => {
+        fetchProgress.value = { loaded, total };
+      };
+      pdfDoc.value = await task.promise;
       currentPage.value = 1;
       await nextTick();
       observePages();
@@ -1423,6 +1485,7 @@ defineExpose({ goToPage, scrollToHighlight, zoomIn, zoomOut, fitWidth, exportMar
       </div>
     </header>
 
+    <div class="viewer-body">
     <div
       class="viewer-scroll"
       ref="viewportEl"
@@ -1434,11 +1497,11 @@ defineExpose({ goToPage, scrollToHighlight, zoomIn, zoomOut, fitWidth, exportMar
       @pointercancel="onPointerUp"
       @pointerleave="clearHoverCursor"
     >
-      <p v-if="!docId" class="placeholder">
+      <p v-if="!docId && !busyOverlay" class="placeholder">
         Upload a PDF drawing to start. The server extracts the text layer and returns bounding
         boxes for every hit.
       </p>
-      <p v-else-if="loading" class="placeholder">Opening document…</p>
+
 
       <div
         v-for="page in pages"
@@ -1548,6 +1611,33 @@ defineExpose({ goToPage, scrollToHighlight, zoomIn, zoomOut, fitWidth, exportMar
         </div>
       </div>
     </div>
+
+      <!-- Progress while the file is on its way in. Anchored over the page area
+           so it is where the user is already looking, not only in the header.
+           Absolutely positioned: it must not shift the pages underneath it. -->
+      <div v-if="busyOverlay" class="loading-panel" role="status" aria-live="polite">
+        <div class="loading-card">
+          <p class="loading-label">{{ busyOverlay.label }}</p>
+          <div
+            class="bar"
+            :class="{ indeterminate: busyOverlay.percent === null }"
+            role="progressbar"
+            :aria-valuenow="busyOverlay.percent ?? undefined"
+            aria-valuemin="0"
+            aria-valuemax="100"
+          >
+            <span
+              class="fill"
+              :style="busyOverlay.percent !== null ? { width: busyOverlay.percent + '%' } : null"
+            ></span>
+          </div>
+          <p class="loading-detail">
+            <span>{{ busyOverlay.detail }}</span>
+            <strong v-if="busyOverlay.percent !== null">{{ busyOverlay.percent }}%</strong>
+          </p>
+        </div>
+      </div>
+    </div>
   </section>
 </template>
 
@@ -1594,6 +1684,7 @@ defineExpose({ goToPage, scrollToHighlight, zoomIn, zoomOut, fitWidth, exportMar
 .viewer-scroll {
   position: relative;
   flex: 1;
+  min-width: 0;
   min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
@@ -1642,6 +1733,92 @@ defineExpose({ goToPage, scrollToHighlight, zoomIn, zoomOut, fitWidth, exportMar
 
 .tools .ghost.active {
   background: var(--accent-soft);
+}
+
+.viewer-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+/* Centred on the visible pane, not on the scrolled content, and out of flow so
+   the pages underneath keep their positions. */
+.loading-panel {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  /* Opaque fallback first for engines without color-mix; the tinted version
+     lets the first page show through as it paints. */
+  background: var(--viewer-bg);
+  background: color-mix(in srgb, var(--viewer-bg) 72%, transparent);
+}
+
+.loading-card {
+  width: min(340px, 80%);
+  display: grid;
+  gap: 10px;
+  padding: 16px 18px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  box-shadow: var(--dialog-shadow);
+}
+
+.loading-label {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+.fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 160ms ease;
+}
+
+/* No measurable progress: a stripe that travels, so it still reads as working. */
+.bar.indeterminate .fill {
+  width: 35%;
+  animation: slide 1.1s ease-in-out infinite;
+}
+
+@keyframes slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(340%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar.indeterminate .fill {
+    width: 100%;
+    animation: none;
+    opacity: 0.6;
+  }
+}
+
+.loading-detail {
+  margin: 0;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
 }
 
 .placeholder {

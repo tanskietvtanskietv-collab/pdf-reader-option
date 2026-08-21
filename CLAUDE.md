@@ -309,6 +309,14 @@ below. **The browser window never scrolls** — `html, body, #app` are
   than the flushed layout), and a `zoomToken` lets only the newest zoom of a
   burst apply its correction. Toolbar +/−/100 % go through the same path,
   anchored on the viewport centre.
+- **Loading progress** is shown over the page area, not just in the header:
+  `busyOverlay` walks four stages — uploading (real % from the XHR),
+  parsing on the server (indeterminate), pdf.js fetching the bytes back (real %
+  from `loadingTask.onProgress` when the response has a Content-Length), and the
+  first paint. It clears on `renderedPages.size > 0` rather than on the current
+  page having rendered, so one failed page cannot strand it on screen. The panel
+  lives in `.viewer-body`, a positioned wrapper, so it overlays the pages instead
+  of pushing them down.
 - Pages render lazily in a ±3 page window around the visible set
   (`RENDER_WINDOW`); canvases outside it are zeroed. A zoom change stretches the
   existing bitmaps immediately and debounces the sharp re-render by 110 ms —

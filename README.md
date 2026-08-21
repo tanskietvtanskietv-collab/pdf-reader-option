@@ -23,7 +23,7 @@ client (Vue 3, Vite)                     server (Express, pdf.js)
 - Japanese-aware matching: half-width and full-width kana, `ＷＦ`/`WF`, and terms
   full of regex characters like `(H)`, `24-`, `CH=` and `+レ` all just work.
 - Viewer: fixed 100 % start, Ctrl+wheel zoom, hand-tool panning, lazy page
-  rendering, a resizable split.
+  rendering, a resizable split, and a progress panel while a drawing loads.
 - Markup: red pencil, check stamp, rectangle and circle, with selectable
   thickness. Shapes can be selected, moved, resized and deleted; undo/redo
   covers every edit.
@@ -231,6 +231,9 @@ grab the divider and move it left or right and both sides resize together. It
 clamps to 10–60 %, never lets the panel fall under 180 px, resets on double
 click, takes arrow keys when focused, and remembers the width in localStorage.
 
+- **Loading** — uploading a drawing shows a progress panel over the viewer:
+  a real percentage while the file uploads and while the browser fetches it back,
+  and a moving bar while the server reads the text layer.
 - **Header** — upload button, file name, live processing status, and a **dark /
   light theme switch**. Starts light every time until you switch it, then
   remembers your choice.

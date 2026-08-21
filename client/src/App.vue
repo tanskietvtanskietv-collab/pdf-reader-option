@@ -440,6 +440,8 @@ const statusLabel = computed(() => {
         :pages="doc?.pages ?? []"
         :highlights="highlights"
         :active-index="activeIndex"
+        :phase="status.state"
+        :phase-progress="status.progress"
         @error="setStatus('error', $event)"
         @marks="markCount = $event"
       />
