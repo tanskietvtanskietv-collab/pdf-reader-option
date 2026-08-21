@@ -511,3 +511,160 @@ test('export file names are stripped of paths and forced to .pdf', () => {
   assert.equal(targets.safeFileName('...'), 'document-marked.pdf');
   assert.equal(targets.safeFileName(null), 'document-marked.pdf');
 });
+
+test('saving overwrites atomically and leaves no temp files', async () => {
+  const fsp = await import('node:fs/promises');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'pdf-write-'));
+  process.env.EXPORT_ROOT = dir;
+
+  try {
+    const first = await targets.writeToFolder('.', 'plan.pdf', Buffer.from('%PDF one'));
+    assert.equal((await fsp.readFile(first.path)).toString(), '%PDF one');
+
+    await assert.rejects(
+      targets.writeToFolder('.', 'plan.pdf', Buffer.from('%PDF two')),
+      (error) => error.status === 409,
+      'an existing file must not be replaced silently',
+    );
+
+    await targets.writeToFolder('.', 'plan.pdf', Buffer.from('%PDF two'), { overwrite: true });
+    assert.equal((await fsp.readFile(first.path)).toString(), '%PDF two');
+
+    const leftovers = (await fsp.readdir(dir)).filter((name) => name.endsWith('.tmp'));
+    assert.deepEqual(leftovers, [], 'the temp file must be renamed or removed');
+  } finally {
+    delete process.env.EXPORT_ROOT;
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a locked target reports 423 and leaves the previous file intact', async (t) => {
+  const fsp = await import('node:fs/promises');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'pdf-lock-'));
+  process.env.EXPORT_ROOT = dir;
+
+  try {
+    const saved = await targets.writeToFolder('.', 'plan.pdf', Buffer.from('%PDF original'));
+    // Read-only stands in for the EBUSY a PDF viewer holding the file produces.
+    await fsp.chmod(saved.path, 0o444);
+
+    let error = null;
+    try {
+      await targets.writeToFolder('.', 'plan.pdf', Buffer.from('%PDF replacement'), {
+        overwrite: true,
+      });
+    } catch (thrown) {
+      error = thrown;
+    }
+
+    if (!error) {
+      t.skip('the filesystem ignored the read-only bit (running as root?)');
+      return;
+    }
+
+    assert.equal(error.status, 423);
+    assert.equal(error.code, 'ELOCKED_PDF');
+    assert.match(error.message, /open in another program/);
+    // The whole point of writing via a temp file: the old export survives.
+    assert.equal((await fsp.readFile(saved.path)).toString(), '%PDF original');
+    assert.deepEqual(
+      (await fsp.readdir(dir)).filter((name) => name.endsWith('.tmp')),
+      [],
+    );
+    await fsp.chmod(saved.path, 0o666);
+  } finally {
+    delete process.env.EXPORT_ROOT;
+    await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+/* ------------------------------------------------------------ pasted images */
+
+// Smallest valid JPEG that round-trips: an 8x8 block.
+const SAMPLE_JPEG =
+  '/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0a' +
+  'HBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAAIAAgBAREA/8QAHwAAAQUBAQEB' +
+  'AQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1Fh' +
+  'ByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZ' +
+  'WmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXG' +
+  'x8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/9oACAEBAAA/APn+iiiiiiiiiiiiiiii' +
+  'iiiiiiiv/9k=';
+
+const imageMark = (over = {}) => ({
+  page: 1,
+  x: 150,
+  y: 300,
+  w: 240,
+  h: 240,
+  image: { data: SAMPLE_JPEG, pixelWidth: 8, pixelHeight: 8 },
+  ...over,
+});
+
+test('image marks are validated before anything is embedded', () => {
+  const [ok] = validateMarks([imageMark()], 1);
+  assert.equal(ok.kind, 'image');
+  assert.equal(ok.pixelWidth, 8);
+  assert.ok(Buffer.isBuffer(ok.jpeg));
+
+  // The PDF stream is declared DCTDecode, so non-JPEG bytes would produce a
+  // file no viewer can open — they must be refused here, not written.
+  assert.throws(
+    () => validateMarks([imageMark({ image: { data: 'aGVsbG8=', pixelWidth: 4, pixelHeight: 4 } })], 1),
+    /not a JPEG/,
+  );
+  assert.throws(
+    () => validateMarks([imageMark({ image: { data: SAMPLE_JPEG } })], 1),
+    /pixelWidth/,
+  );
+  assert.throws(() => validateMarks([imageMark({ w: 0 })], 1), /empty image box/);
+  assert.throws(() => validateMarks([imageMark({ x: 'nope' })], 1), /finite/);
+});
+
+integration('a pasted image is embedded as a /Stamp with the original bytes', async () => {
+  const zlib = await import('node:zlib');
+  const { burnAnnotations } = await import('../src/services/annotate.js');
+
+  const marks = validateMarks(
+    [
+      { page: 1, width: 2, points: [{ x: 60, y: 60 }, { x: 200, y: 120 }] },
+      imageMark(),
+    ],
+    1,
+  );
+  const annotated = await burnAnnotations(buildFixturePdf(), marks);
+
+  const { openDocument } = await import('../src/services/pdfParser.js');
+  const { doc } = await openDocument(annotated);
+  try {
+    const page = await doc.getPage(1);
+    const annots = await page.getAnnotations();
+    // Ink and image marks have to coexist in one export.
+    assert.deepEqual(annots.map((a) => a.subtype).sort(), ['Ink', 'Stamp']);
+
+    const stamp = annots.find((a) => a.subtype === 'Stamp');
+    // Viewport y 300..540 on an 842pt page flips to user space 302..542.
+    const [x0, y0, x1, y1] = stamp.rect.map(Math.round);
+    assert.deepEqual([x0, y0, x1, y1], [150, 302, 390, 542]);
+  } finally {
+    await doc.destroy();
+  }
+
+  // The embedded stream must be exactly the JPEG that was pasted.
+  const latin = Buffer.from(annotated).toString('latin1');
+  const start = latin.indexOf('stream', latin.indexOf('/Subtype /Image')) + 'stream'.length + 1;
+  const end = latin.indexOf('endstream', start);
+  const stored = zlib.inflateSync(Buffer.from(annotated).subarray(start, end));
+  assert.ok(stored.equals(Buffer.from(SAMPLE_JPEG, 'base64')), 'image bytes were altered');
+});
+
+integration('an export with images leaves later parsing unaffected', async () => {
+  // The image path installs an OffscreenCanvas shim; text extraction must not
+  // start behaving differently because of it.
+  const { burnAnnotations } = await import('../src/services/annotate.js');
+  await burnAnnotations(buildFixturePdf(), validateMarks([imageMark()], 1));
+
+  const reparsed = await parsePdf(buildFixturePdf());
+  const record2 = { pages: reparsed.pages, totalPages: reparsed.totalPages };
+  assert.equal(searchDocument(record2, 'SA').totalMatches, 3);
+  assert.equal(searchDocument(record2, 'ｽﾃﾝﾊﾟｲﾌﾟ').totalMatches, 1);
+});

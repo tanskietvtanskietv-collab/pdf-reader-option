@@ -11,8 +11,9 @@ coordinates. The Vue client renders the PDF and paints the server's coordinates
 over it. Two fixed terminology dictionaries drive the search panel: **Wakugumi**
 (73 terms) and **Jikugumi** (88 terms).
 
-On top of search the viewer offers red pencil / check-stamp markup, and **Save as
-PDF** writes those marks into a copy of the document server-side.
+On top of search the viewer offers markup — red pencil, check stamp, rectangle,
+circle, and screenshots pasted with Ctrl+V — and **Save as PDF** writes all of it
+into a copy of the document server-side.
 
 The server is the single source of truth for counts, coordinates, and the
 dictionaries. The client is a renderer — it must never re-implement matching.
@@ -103,7 +104,7 @@ query ──► NFKC normalize ──► escaped regex ──┘                
                                                                         ▼
                             client: pdf.js canvas + absolutely positioned overlays
                                                                         │
-      marks drawn on the client (PDF points) ──► burnAnnotations ──► /Ink annotations
+      marks drawn on the client (PDF points) ──► burnAnnotations ──► /Ink + /Stamp
                                                         │                 │
                                           the cached original is           ▼
                                           never modified          browser save dialog
@@ -123,7 +124,8 @@ query ──► NFKC normalize ──► escaped regex ──┘                
   cache. **Swapping in Redis means replacing only this file**; nothing else
   touches storage.
 - [annotate.js](server/src/services/annotate.js) — writes client marks into a PDF
-  copy as `/Ink` annotations, using pdf.js rather than a second PDF library.
+  copy: strokes and shapes as `/Ink`, pasted screenshots as `/Stamp`. Uses pdf.js
+  itself rather than pulling in a second PDF library.
 - [exportTargets.js](server/src/services/exportTargets.js) — folder browsing and
   file writing for Save As, plus the path confinement that keeps it safe.
 - [normalize.js](server/src/utils/normalize.js) / [regex.js](server/src/utils/regex.js)
@@ -132,8 +134,9 @@ query ──► NFKC normalize ──► escaped regex ──┘                
 **Client**
 
 - [PdfViewer.vue](client/src/components/PdfViewer.vue) — canvas rendering, zoom
-  (toolbar and Ctrl+wheel), hand-tool panning, the pencil / check-stamp markup
-  layer, lazy page window, highlight overlay.
+  (toolbar and Ctrl+wheel), hand-tool panning, the markup layer (pencil, check
+  stamp, shapes, pasted images) with its select/move/resize handles, lazy page
+  window, highlight overlay. By far the largest component.
 - [SearchPanel.vue](client/src/components/SearchPanel.vue) — dictionary rows,
   count badges, searched ticks. Holds only per-row *edits*; results live in
   [App.vue](client/src/App.vue) keyed by `${category}#${index}`.
@@ -193,7 +196,7 @@ merged `bounds` plus the individual `rects`.
 | GET | `/api/pdf/:docId/page/:n` | Page geometry; `?include=text` adds the normalised text layer. Returns geometry, **not** a rasterised image (that would need a native canvas binding). |
 | POST | `/api/pdf/search` | `{ docId, query, category }` → `{ totalMatches, pages[], results[] }` |
 | POST | `/api/pdf/search/batch` | Whole category in one round trip; **counts only, no coordinates** — the client fetches those when a row becomes active. |
-| POST | `/api/pdf/:docId/export` | Save As: `{ marks: [{ page, points[], width }] }` in **viewport points** -> a PDF copy with the marks burned in as `/Ink` annotations. Streams the bytes back, or writes to disk when `destination` is given. |
+| POST | `/api/pdf/:docId/export` | Save As. Marks are in **viewport points**: `{ page, points[], width }` becomes an `/Ink` annotation, `{ page, x, y, w, h, image }` a `/Stamp`. Streams the bytes back, or writes to disk when `destination` is given. |
 | GET | `/api/folders?path=` | Folders on the server machine for the save dialog; empty `path` = drives + shortcuts. |
 | GET | `/api/folders/enabled` | Whether server-side saving is on, and its root. |
 | GET | `/api/categories` | Dictionaries; the client never hardcodes them. |
@@ -235,26 +238,58 @@ below. **The browser window never scrolls** — `html, body, #app` are
   width / fit page remain available from the toolbar. The scroll container uses
   block layout with `margin: 0 auto` per page — flex `align-items: center` clips
   the left edge of a page wider than the pane and makes it unreachable.
-- **Annotations** (`tool` = `pan` | `pencil` | `check`). Pencil draws red
-  freehand, the check stamp drops a red tick where you click, and both take the
-  thickness from the toolbar `select`. Marks are stored **in PDF points at scale
-  1** — the same contract as search hits — and rendered into a per-page
-  `<svg viewBox="0 0 pageW pageH">` sized to the page box, so the browser scales
-  them with the zoom and they stay welded to the drawing instead of drifting.
-  Storing screen pixels here would be the obvious mistake. The SVG is
-  `pointer-events: none`; the scroll container owns all pointer handling.
-  Strokes lock to the page they started on (`pdfPointAt(..., lockedIndex)`), and
-  points are pushed rather than copied — `ref()` is deeply reactive, and
-  rebuilding the array per `pointermove` makes a long stroke quadratic.
+- **Annotations** (`tool` = `pan` | `select` | `pencil` | `check` | `rect` |
+  `circle`). Pencil draws red freehand, the check stamp drops a red tick, and
+  rect/circle drag out a red outline; all take the thickness from the toolbar
+  `select`. Marks are stored **in PDF points at scale 1** — the same contract as
+  search hits — and rendered into a per-page `<svg viewBox="0 0 pageW pageH">`
+  sized to the page box, so the browser scales them with the zoom and they stay
+  welded to the drawing instead of drifting. Storing screen pixels here would be
+  the obvious mistake. The SVG is `pointer-events: none`; the scroll container
+  owns all pointer handling. Strokes lock to the page they started on
+  (`pdfPointAt(..., lockedIndex)`), and points are pushed rather than copied —
+  `ref()` is deeply reactive, and rebuilding the array per `pointermove` makes a
+  long stroke quadratic.
+- **Shapes** carry `{ x, y, w, h }` rather than points, and `w`/`h` may be
+  negative while being dragged; `normalizedBox()` is what every consumer reads.
+  A shape tool **stays active after a shape is finished**, so one click on the
+  circle button lets you draw any number of circles; `select` is a separate tool.
+  The 8 resize handles and the selection outline are sized `HANDLE_PX / scale`
+  and `1 / scale`, so they stay a constant size on screen at any zoom — sizing
+  them in points would make them microscopic at 800 %.
+- **Cursor feedback** comes from `cursorFor()`, bound inline as `:style` and
+  applied only while the select tool is active, so the other tools keep the
+  cursor their CSS class sets. Over a shape it is `move`; over a handle it is the
+  double-headed arrow for that axis (`nwse-` / `nesw-` / `ns-` / `ew-resize`).
+  The hit test walks page rects, so it is throttled to one `requestAnimationFrame`
+  and skipped entirely while dragging — a drag pins the cursor it started with,
+  otherwise straying a pixel off a handle would flicker it back to `move`.
+- **Pasted screenshots** (Ctrl+V, window `paste` listener) become
+  `type: 'image'` marks. They use the same box model as shapes, so select, move,
+  resize and delete come for free — `isShape()` includes them deliberately. The
+  clipboard PNG is re-encoded to **JPEG** in the browser, capped at 1600px on the
+  long edge, because that is what the PDF embeds directly as `DCTDecode` and a
+  full-screen PNG is several times larger on the wire.
+- **The export stays shape-agnostic.** `markPoints()` flattens everything to a
+  polyline before it leaves the client: a rectangle is a closed 5-point line, an
+  ellipse a 64-segment polygon. The server only ever sees points, so no endpoint
+  changed when shapes were added.
   Annotations live in memory only and are cleared when a new document loads —
   until **Save as PDF**, which posts them to `POST /api/pdf/:docId/export`.
-- **Shortcuts** (window `keydown` in `PdfViewer`): `Esc` returns to the hand tool
-  and discards any half-drawn stroke; `Ctrl/Cmd+Z` undoes, `Ctrl/Cmd+Y` (and
+- **Shortcuts** (window `keydown` / `paste` in `PdfViewer`): `Ctrl+V` pastes an
+  image from the clipboard; `Delete`/`Backspace` removes
+  the selected shape; `Esc` clears the selection, then discards a half-drawn
+  stroke, then returns to the hand tool; `Ctrl/Cmd+Z` undoes, `Ctrl/Cmd+Y` (and
   `Ctrl+Shift+Z`, since Cmd+Y is not redo on macOS) redoes. The handler bails out
   via `isTypingTarget()` when focus is in an input/textarea/select — otherwise
   Ctrl+Z in a search-panel term field would delete a drawn mark instead of
-  undoing the typing. Drawing a new mark drops the redo stack; `Clear` pushes the
-  marks onto it **reversed**, so repeated redo restores them in draw order.
+  undoing the typing, and Backspace could not edit text at all.
+- **Undo history is whole-array snapshots**, not an add/remove log. Moving or
+  resizing a shape edits a mark in place, which an add/remove stack cannot
+  express — those edits would silently not be undoable. `pushHistory()` records
+  the pre-change array; a drag records it once at `pointerdown`, not per
+  `pointermove`. `keepSelectionValid()` drops the selection when undo removes the
+  selected mark, otherwise its handles hang in mid-air.
 - **Hand tool.** Hovering the page area shows `cursor: grab`, and holding the
   left button drags the document (`grabbing` while held). Each `pointermove`
   scrolls to `origin.scroll - (client - origin.client)` — computed from the drag
@@ -303,6 +338,28 @@ with **pdf.js itself** — no `pdf-lib`, no second PDF library. Marks go into
 appends them as an incremental update, leaving the original bytes and the text
 layer intact (the export re-parses and still searches identically).
 
+Pasted screenshots take a different route: pdf.js writes them as `/Stamp`
+annotations, but its writer builds the image through an `OffscreenCanvas`, which
+Node does not have. Reading that code shows the canvas does only two jobs —
+encode the pixels to JPEG, and scan the alpha channel to decide on an SMask — and
+the client has already answered both (it sent a JPEG, and JPEG has no alpha). So
+[annotate.js](server/src/services/annotate.js) installs a **carrier shim**:
+`convertToBlob()` hands the client bytes straight back and `getImageData()`
+reports fully opaque. Two details keep that working:
+
+- `getDocument({ isOffscreenCanvasSupported: true })` — it defaults to false in
+  Node and `generateImages()` bails out early without it. Only the export path
+  opts in, and only when the payload actually carries an image.
+- `AnnotationStorage.serializable` pushes every `value.bitmap` onto a structured
+  clone **transfer list**, which rejects a plain carrier object with `Found
+  invalid value in transferList`. `clearBitmapTransfers()` shadows that getter
+  with an empty list — the worker is in-process here, so nothing needs
+  transferring.
+
+Both lean on `pdfjs-dist@4.10.38` internals, which is why the tests assert the
+embedded stream is **byte-identical** to what was pasted: that is the check that
+would catch a breaking change on upgrade.
+
 Two things are easy to get wrong here:
 
 - **Coordinates.** Marks arrive in viewport space (top-left origin); PDF user
@@ -333,6 +390,13 @@ confines it to one tree, `EXPORT_ENABLED=false` disables it. File names are
 always reduced to a basename and forced to `.pdf`, and an existing file 409s
 unless `overwrite` is set.
 
+Writes go through a temp file in the same folder and a rename, never straight
+over the target: overwriting in place truncates first, so a mid-write failure
+would destroy the previous export. On Windows the rename is retried a few times
+(an indexer or antivirus lock usually clears in a moment); a lock held by a PDF
+viewer does not, and surfaces as **423** with `ELOCKED_PDF` rather than a raw
+`EBUSY` 500. The old file is left intact either way.
+
 In **confined** mode the Windows trap matters: `path.resolve(root, 'C:Windows')`
 resolves a drive-relative path against the *process cwd*, not the root, and
 `path.relative` then reports an innocent-looking result — so `resolveFolder()`
@@ -361,7 +425,7 @@ terms after NFKC and both must survive.
 
 ## Tests
 
-[server/test/run-tests.mjs](server/test/run-tests.mjs), `node:test`, 37 tests in
+[server/test/run-tests.mjs](server/test/run-tests.mjs), `node:test`, 42 tests in
 four tiers. Everything except tier 3 runs without `node_modules`:
 
 1. Unit — normalisation, regex escaping, every dictionary term compiling.
@@ -376,8 +440,11 @@ four tiers. Everything except tier 3 runs without `node_modules`:
    mark, and a rotated label. These self-skip if `pdfjs-dist` is missing. The
    export tests live here too: marks burn in as `/Ink`, land in the right place
    after the top-left → bottom-left flip, and **the exported file is re-parsed
-   and searched** to prove the text layer survived.
-4. Save targets — path confinement and file-name sanitising for
+   and searched** to prove the text layer survived. A pasted image is asserted to
+   come back **byte-identical** out of the finished PDF, which is the check that
+   would catch pdf.js changing its stamp internals on upgrade.
+4. Save targets — path confinement, file-name sanitising, atomic overwrite and
+   the locked-file path for
    [exportTargets.js](server/src/services/exportTargets.js). The confinement test
    walks twelve escape shapes (`..`, UNC, `D:\`, and the drive-relative
    `C:Windows` that slips past a naive resolve-then-check). It sets

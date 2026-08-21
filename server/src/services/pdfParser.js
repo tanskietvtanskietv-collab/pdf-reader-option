@@ -132,7 +132,7 @@ function isFullWidth(cp) {
  * writer so both paths decode Adobe-Japan1 text identically.
  * @returns {Promise<{ pdfjs:object, doc:object }>} caller must `doc.destroy()`.
  */
-export async function openDocument(buffer) {
+export async function openDocument(buffer, { withImages = false } = {}) {
   const pdfjs = await loadPdfjs();
   const { cMapUrl, standardFontDataUrl } = pdfjsAssets();
   const doc = await pdfjs.getDocument({
@@ -143,6 +143,9 @@ export async function openDocument(buffer) {
     useWorkerFetch: false,
     isEvalSupported: false,
     useSystemFonts: false,
+    // Defaults to false in Node. Only the export path opts in, and only when it
+    // has images to embed — see the canvas shim in annotate.js.
+    isOffscreenCanvasSupported: withImages,
     verbosity: 0,
   }).promise;
   return { pdfjs, doc };

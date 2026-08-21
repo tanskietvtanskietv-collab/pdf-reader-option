@@ -3,14 +3,15 @@
 Web based PDF reader that parses construction drawings on a Node.js backend, runs
 full text search over the extracted text layer, and returns **hit counts plus
 bounding box coordinates** that the Vue client paints over the rendered page.
-Drawings can then be marked up in red and saved as a new PDF.
+Drawings can then be marked up — freehand, shapes, pasted screenshots — and
+saved as a new PDF.
 
 ```
 client (Vue 3, Vite)                     server (Express, pdf.js)
 ┌──────────────────────────┬────────┐    ┌──────────────────────────────────┐
 │ PDF viewer  85%          │search  │    │ POST /api/pdf/upload  parse+cache│
 │  canvas + highlights     │ panel  │ ─► │ POST /api/pdf/search  NFKC+regex │
-│  zoom / pan / markup     │ 15%    │ ◄─ │ POST /api/pdf/../export  -> /Ink │
+│  zoom / pan / markup     │ 15%    │ ◄─ │ POST /api/pdf/../export  Ink+img │
 └──────────────────────────┴────────┘    └──────────────────────────────────┘
        drag the divider ⇔ both sides resize
 ```
@@ -23,7 +24,11 @@ client (Vue 3, Vite)                     server (Express, pdf.js)
   full of regex characters like `(H)`, `24-`, `CH=` and `+レ` all just work.
 - Viewer: fixed 100 % start, Ctrl+wheel zoom, hand-tool panning, lazy page
   rendering, a resizable split.
-- Markup: red pencil and check stamp with selectable thickness, undo/redo.
+- Markup: red pencil, check stamp, rectangle and circle, with selectable
+  thickness. Shapes can be selected, moved, resized and deleted; undo/redo
+  covers every edit.
+- **Paste a screenshot** with Ctrl+V — Snipping Tool captures included — then
+  move and resize it like any other shape.
 - **Save as PDF** writes the marks into a copy as real PDF annotations; the
   original and its search index are never touched.
 - Light theme by default, with a dark mode you can switch on.
@@ -62,7 +67,7 @@ themselves automatically until `npm install` has run in `server/`.
 | `GET` | `/api/pdf/:docId/page/:pageNumber` | Page geometry for the viewer; `?include=text` also returns the normalised text layer. |
 | `POST` | `/api/pdf/search` | `{ docId, query, category }` → `{ query, totalMatches, pages[], results[] }` |
 | `POST` | `/api/pdf/search/batch` | `{ docId, category }` → one count row per dictionary term, in a single round trip. |
-| `POST` | `/api/pdf/:docId/export` | **Save As.** `{ marks: [{ page, points[], width }] }` -> a copy of the PDF with the marks burned in as standard `/Ink` annotations. With `destination` + `fileName` the server writes it into that folder instead of streaming it back. The cached original is untouched. |
+| `POST` | `/api/pdf/:docId/export` | **Save As.** `{ marks: [...] }` -> a copy of the PDF with the marks burned in: `{ page, points[], width }` becomes an `/Ink` annotation, `{ page, x, y, w, h, image }` an embedded `/Stamp` image. With `destination` + `fileName` the server writes it into that folder instead of streaming it back. The cached original is untouched. |
 | `GET` | `/api/folders?path=` | Sub-folders of a directory on the server machine, for the save dialog. An empty `path` returns the drive list plus Desktop/Documents/Downloads shortcuts. Restricted to `EXPORT_ROOT` when that is set. |
 | `GET` | `/api/folders/enabled` | Whether server-side saving is available, and the root it is confined to. |
 | `DELETE` | `/api/pdf/:docId` | Drops the cached index and the temp file. |
@@ -121,17 +126,35 @@ Options accepted by both search endpoints: `caseInsensitive` (default `true`),
 
 ## Markup and saving
 
-The pencil and check stamp write into an SVG layer whose `viewBox` is the page
-box, so every mark is stored in **PDF points at scale 1** — the same units search
-hits use. Marks therefore stay welded to the drawing through zoom, pan and a
-resize, and stroke widths scale with the document. Undo/redo (`Ctrl+Z`/`Ctrl+Y`)
-is a two-stack model; `Clear` is recoverable because it pushes the marks onto the
-redo stack in reverse.
+The markup tools — pencil, check stamp, **rectangle** and **circle** — write into
+an SVG layer whose `viewBox` is the page box, so every mark is stored in **PDF
+points at scale 1**, the same units search hits use. Marks therefore stay welded
+to the drawing through zoom, pan and a resize, and stroke widths scale with the
+document.
+
+A shape tool stays selected after you finish a shape, so picking **Circle** once
+lets you draw as many circles as you want; the same goes for **Rectangle**.
+
+Switch to the **Select** tool to click a rectangle, circle or pasted image. It
+gets a dashed outline and eight handles, and the pointer tells you what will
+happen: a **move** cursor over the body, and a **double-headed arrow** over each
+handle pointing along the axis it resizes. Drag inside to move it, drag a handle
+to resize it, press **Delete** to remove it. The handles keep a constant size on
+screen at any zoom. Undo and redo
+(`Ctrl+Z` / `Ctrl+Y`) cover drawing, moving, resizing, deleting and Clear alike,
+because the history stores snapshots rather than a list of additions.
+
+Pressing **Ctrl+V** drops whatever image is on the clipboard onto the page you
+are looking at, sized to about half the page width. It behaves like a shape from
+then on, and ends up in the saved PDF as a real embedded image. Captures are
+re-encoded to JPEG (max 1600px on the long edge) to keep the upload reasonable.
 
 **Save as PDF** posts the marks to `POST /api/pdf/:docId/export`, where
 [annotate.js](server/src/services/annotate.js) writes them into a copy of the
 document as standard `/Ink` annotations — using pdf.js itself, so there is no
-second PDF library in the tree. `viewport.convertToPdfPoint()` performs the
+second PDF library in the tree. Shapes are flattened to polylines first — a
+rectangle is a closed 5-point line, a circle a 64-segment polygon — so the server
+never needs to know about shape types. `viewport.convertToPdfPoint()` performs the
 top-left → bottom-left flip and handles pages with a `/Rotate` entry. The cached
 original is never modified, and the exported file remains fully searchable.
 
@@ -149,6 +172,10 @@ The destination is always chosen **before** anything is written:
 > folder tree, or `EXPORT_ENABLED=false` to switch it off. File names are always
 > reduced to a basename and forced to `.pdf`, and an existing file is never
 > overwritten without confirmation.
+
+Overwriting a file that is **currently open in a PDF viewer** cannot work on
+Windows — the file is locked. The app says so plainly and leaves the existing
+file untouched; close the file, or save under a different name.
 
 ## Theme
 
@@ -216,8 +243,10 @@ click, takes arrow keys when focused, and remembers the width in localStorage.
   plain scroll still scrolls. Toolbar zoom in/out, zoom percentage, 100 %, fit
   width/page, page counter, lazy rendering with a ±3 page window, highlight
   overlay. Pages wider than the pane overflow to the right and stay reachable.
-  **Markup tools**: a red pencil for freehand notes and a red check stamp, both
-  with a thickness selector (thin / medium / thick / extra), plus undo and clear.
+  **Markup tools**: red pencil, check stamp, rectangle and circle, with a
+  thickness selector (thin / medium / thick / extra), a select tool for moving,
+  resizing and deleting, plus undo, redo and clear. **Ctrl+V** pastes a
+  screenshot from the clipboard onto the page.
   **Esc** drops back to the hand tool, **Ctrl+Z** undoes and **Ctrl+Y** redoes
   (ignored while a search field has focus, so text editing keeps its own undo).
   Marks are held in PDF points, so they stay locked to the drawing at any zoom.
@@ -248,6 +277,7 @@ server/src/
   utils/regex.js             escaping + query compilation
   data/categories.js         the two dictionaries
 client/src/
+  main.js                    mounts the app
   App.vue                    layout, upload, per-term search state, save flow
   api.js                     every call to the backend, save-dialog helpers
   styles.css                 the light / dark token palettes

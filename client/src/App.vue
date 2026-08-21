@@ -283,6 +283,8 @@ async function saveToFolder({ destination, fileName, overwrite = false }) {
       }
       saveError.value = 'Pick another name or folder.';
     } else {
+      // 423 = the target is locked (open in a PDF viewer); the message already
+      // says what to do, and the dialog stays open so the name can be changed.
       saveError.value = error.message;
     }
     setStatus('ready', '');
